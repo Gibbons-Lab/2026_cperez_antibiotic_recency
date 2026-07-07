@@ -1,0 +1,234 @@
+---
+title: "alpha_diversity_calcs_abx"
+author: "Crystal Perez"
+date: "2026-07-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load.packages}
+knitr::opts_chunk$set(echo = TRUE)
+library(permute)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+```{r}
+packageVersion("vegan")
+```
+
+```{r read.in.data}
+# Specifying colClass so leading 0 is not dropped
+counts = read.csv("data/rh_abx_genus_level_counts.csv",
+                  colClasses = c(public_client_id = "character"))
+
+counts$days_in_program <- NULL
+
+# Specifying colClass so leading 0 is not dropped
+metadata = read.csv("data/abx_covariates_with_statins_a1c_all_covars.csv",
+                    colClasses = c(public_client_id = "character"))
+ 
+filtered_metadata = filter(metadata, public_client_id %in% counts$public_client_id)
+```
+
+Remember 0 col mean the taxon is not observed in anyone in our cohort subset;
+remove these
+
+```{r remove.zero.columns}
+counts = counts %>% pivot_longer(-public_client_id) %>%  # ASVs the rows again
+  group_by(public_client_id) %>%                         # Groups by person
+  group_by(name) %>%                                     # Group by taxa
+  mutate(total = sum(value)) %>%
+  filter(total != 0) %>%                                 # Keep taxa that not 0
+  ungroup() %>%
+  pivot_wider(id_cols = public_client_id) %>%
+  as.data.frame()
+```
+
+Now we want to look at the counts/reads per person to see the range
+
+```{r check.counts.per.person}
+# This will check the number of counts per sample
+counts_per_person <- counts %>% pivot_longer(-public_client_id) %>% 
+  group_by(public_client_id) %>%                # Groups by person
+  summarise(total = sum(value)) %>%             # Sum counts/person
+  arrange(total)                                # Shows lowest counts first
+
+# Least num counts is 21869, max is 498642
+```
+
+Want to see number of features as a function of the counts
+
+```{r generate.data.to.plot.relationship}
+# Add clients as row names, drop that col
+rownames(counts) <- counts$public_client_id
+counts$public_client_id <- NULL
+
+# Count the number of features per row
+row_sums_non_zero <- rowSums(counts != 0)
+# names(row_sums_non_zero) # This is ordered how I want
+
+# Order the tibble (sum of counts)
+ordered_tibble_asc <- counts_per_person %>%
+  arrange(public_client_id)
+
+data <- data.frame(x = ordered_tibble_asc$total, # Sum of counts
+                   y = row_sums_non_zero)        # Num of obs features
+```
+
+```{r check.if.log.fit.good}
+# Fit logarithmic curve using nls()
+log_fit <- nls(y ~ a + b * log(x), data = data, start = list(a = 0, b = 1))
+
+# Print the summary of the fit
+summary(log_fit)
+```
+
+```{r}
+# Generate predicted values for the curve
+curve_data <- data.frame(x = seq(min(data$x), max(data$x), length.out = 100))
+curve_data$y <- predict(log_fit, newdata = curve_data)
+```
+
+
+```{r}
+# Plot the data and the fitted curve
+ggplot(data, aes(x = x, y = y)) +
+  geom_point(color = "grey") +
+  geom_line(data = curve_data, aes(x = x, y = y), color = "red", linetype = "dashed") +
+  labs(title = "Fitted Logarithmic Curve",
+       x = "Sum of counts per person",
+       y = "Number of obs features")
+```
+
+## Repeat the same thing with Vegan package and see what we get
+
+```{r create.matrix}
+# Need to have it in matrix form for vegan
+counts_matrix <- as.matrix(counts)
+```
+
+```{r get.rarefied.richness}
+# Here S should be the same thing we calc above YAY
+S <- specnumber(counts_matrix)          # obs num of species = row_sums_non_zero
+raremax <- min(rowSums(counts_matrix))  # Gets min counts, also same as above
+
+# Get rarefied species count
+Srare <- rarefy(counts_matrix, raremax) # Num obs spec when rarefying
+plot(S, Srare, xlab = "Observed No. of Species", ylab = "Rarefied No. of Species")
+abline(0, 1)
+```
+Below the vertical line is = to raremax, or the min counts we set
+
+```{r}
+rarecurve(counts_matrix, step = 200, sample = raremax, col = "blue", cex = 0.6)
+```
+
+## Get other diversity estimates
+
+```{r generate.rarefied.matrix}
+set.seed(3)
+rarefied_counts <- rrarefy(counts_matrix, raremax)
+```
+
+```{r save.rarefied.csv}
+# This will be used for logistic regression and the microbe-metab regressions
+write.csv(rarefied_counts, "data/rh_abx_cohort_rarefied_counts.csv", row.names = TRUE)
+```
+
+### Shannon
+
+```{r shannon}
+H <- diversity(rarefied_counts)
+```
+
+### Berger-Parker
+
+```{r berger_parker}
+bp <- apply(rarefied_counts, 1, function(x) {
+  if(sum(x)==0) return(NA)
+  max(x) / sum(x)
+})
+```
+
+## Put these together and export
+
+```{r create_alpha_df}
+obs_feats <- data.frame(public_client_id = names(Srare), observed_features = Srare)
+shannon <- data.frame(public_client_id = names(H), shannon_index = H)
+bp_df <- data.frame(public_client_id = names(bp), berger_parker = bp)
+
+alpha_meta <- Reduce(function(x, y) merge(x, y, by="public_client_id", all=TRUE),
+             list(filtered_metadata, obs_feats, shannon, bp_df))
+alpha_meta
+```
+
+```{r save.csv}
+write.csv(alpha_meta, "data/rh_abx_covar_alpha_divs_rarefied.csv", row.names = FALSE)
+```
+
+
+## Now let's do the same thing with the follow up stool count tables
+
+```{r read.in.get.matrix}
+counts_followup = read.csv("",
+                  colClasses = c(public_client_id = "character"))
+
+# Add clients as row names, drop that col
+rownames(counts_followup) <- counts_followup$public_client_id
+counts_followup$public_client_id <- NULL
+
+counts_matrix_followup <- as.matrix(counts_followup)
+```
+
+```{r}
+S_fu <- specnumber(counts_matrix_followup)          # obs num of species = row_sums_non_zero
+raremax_fu <- min(rowSums(counts_matrix_followup))  # Gets min counts, also same as above
+
+# Get rarefied species count
+Srare_fu <- rarefy(counts_matrix_followup, raremax_fu) # Num obs spec when rarefying
+plot(S_fu, Srare_fu, xlab = "Observed No. of Species", ylab = "Rarefied No. of Species")
+abline(0, 1)
+```
+```{r}
+rarecurve(counts_matrix_followup, step = 200, sample = raremax_fu, col = "blue", cex = 0.6)
+```
+
+```{r}
+set.seed(3)
+rarefied_counts_followup <- rrarefy(counts_matrix_followup, raremax_fu)
+```
+
+
+```{r}
+# Get Shannon
+H_fu <- diversity(rarefied_counts_followup)
+
+# Get BP
+bp_fu <- apply(rarefied_counts_followup, 1, function(x) {
+  if(sum(x)==0) return(NA)
+  max(x) / sum(x)
+})
+
+# Write together?
+obs_feats_fu <- data.frame(public_client_id = names(Srare_fu), 
+                           observed_features_followup = Srare_fu)
+shannon_fu <- data.frame(public_client_id = names(H_fu), 
+                         shannon_index_followup = H_fu)
+bp_df_fu <- data.frame(public_client_id = names(bp_fu), 
+                       berger_parker_followup = bp_fu)
+
+alpha_meta_followup <- Reduce(function(x, y) merge(x, y, by="public_client_id", all=TRUE),
+             list(obs_feats_fu, shannon_fu, bp_df_fu))
+alpha_meta_followup
+```
+
+```{r save.csv.followup}
+#write.csv(alpha_meta_followup, "data/abx_followups_alphadivs_rarefied.csv", row.names = FALSE)
+```
+

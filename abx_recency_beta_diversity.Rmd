@@ -1,0 +1,273 @@
+---
+title: "beta_diversity_abx"
+author: "Crystal Perez"
+date: "2025-04-30"
+output: html_document
+---
+
+# Re-analysis using new cohort July 2026
+
+```{r load.packages}
+knitr::opts_chunk$set(echo = TRUE)
+library(vegan)
+library(ecodist)
+library(ggplot2)
+library(dplyr)
+library(glue)
+library(tidyr)
+```
+
+# Prepare data
+
+```{r read.in.new.data}
+counts = read.csv("data/rh_abx_genus_level_counts.csv",
+                  colClasses = c(public_client_id = "character"))
+
+counts$days_in_program <- NULL
+
+# Specifying colClass so leading 0 is not dropped
+# Using this one bc I added stool vendor already
+metadata = read.csv("data/abx_covariates_with_statins_a1c_all_covars.csv",
+                    colClasses = c(public_client_id = "character"))
+
+filtered_metadata = filter(metadata, public_client_id %in% counts$public_client_id)
+```
+
+```{r remove.zero.columns}
+# Name is the variable for ASVs
+# Value is their count
+counts = counts %>% pivot_longer(-public_client_id) %>%  # Rows are person, ASVs count
+  group_by(public_client_id) %>%                         # Groups by person
+  group_by(name) %>%                                     # Group by taxa  
+  mutate(total = sum(value)) %>%                         # Sums ASVS over all folks
+  filter(total != 0) %>%                                 # Keep taxa that not 0
+  ungroup() %>%
+  pivot_wider(id_cols = public_client_id) %>%
+  as.data.frame()
+
+# Add clients as row names, drop that id column
+rownames(counts) <- counts$public_client_id
+counts$public_client_id <- NULL
+
+# Need to have it in matrix form for vegan
+counts_matrix <- as.matrix(counts)
+```
+
+Now that we have a matrix, we should calculate our distance metric. Here I will 
+use `avgdist` as this will subsample the data various times (rarefication). If 
+your data is already rarefied, you can use `vegdist` instead. The `sample` 
+argument should be set == to the minimum number of reads observed across your
+samples. 
+
+I also decided to save the dissimilarity matrix as an RDS file so that I can 
+simply read it in for subsequent runs of this file. For example, if I want to 
+run the entire notebook at once to produce my plot. Note you will need the `dist`
+variable for the pcoa and the PERMANOVA. 
+
+```{r calc.dist}
+# Setting a seed for reproducibility
+#set.seed(3) 
+#dist <- avgdist(counts_matrix, dmethod = "bray", sample = 21869)
+
+# Save an RDS file to skip distance calc in future
+#saveRDS(dist, "rh_distance_matrix_beta_div.rds")
+dist <- readRDS("data/rh_distance_matrix_beta_div.rds")
+```
+
+# Perform PCOA
+
+Writing this note after performing the PCOA, but one can see from the Scree plot
+that the inflection point is at k=5.  
+
+```{r perform.pcoa.and.scree.new}
+# pcoa_result <- cmdscale(dist, k = 5, eig = TRUE, add=TRUE)
+# 
+# # Calculate the variance explained by each coordinate
+# eigenvalues <- pcoa_result$eig
+# total_variance <- sum(eigenvalues[eigenvalues > 0])
+# percent_explained <- pcoa_result$eig / total_variance * 100
+# 
+# # Plot variance explained
+# # Doing all components with `variance explained` was too long
+# # Zoom into the first 20
+# percent_explained_subset <- percent_explained[1:20]
+# 
+# # Scree plot
+# plot(1:20, percent_explained_subset, type = "b",
+#      main = "Scree Plot", xlab = "Principal Coordinate (k)",
+#      ylab = "Eigenvalue or Variance Explained")
+
+# Cumulative sum plot
+# tibble(pe = cumsum(percent_explained),
+#        axis = 1:length(percent_explained)) %>%
+#   ggplot(aes(x=axis, y=pe)) +
+#   geom_line() +
+#   coord_cartesian(xlim = c(1,400))
+```
+
+```{r save.pcoa.result}
+# Save entire object as RDS
+#saveRDS(pcoa_result, "data/rh_pcoa_result_July2025.rds")
+```
+
+More importantly, I want to save my pcoa dataframe which will contain the 
+relevant metadata!
+
+Below `groups` is essentially the "treatment" or whatever variable you're testing.
+
+```{r save.coordinates}
+# # Save coordinates to CSV file
+# coordinates <- as.matrix(pcoa_result$points)
+# 
+# groups = factor(filtered_metadata$abx_recency,
+#                 levels = c("none", "twelve", "three"))
+# 
+# 
+# # Use lapply to create lists of coordinates
+# pco_vectors <- lapply(1:5, function(i) coordinates[, i])
+# 
+# # Convert the list to a dataframe and set the column names
+# pcoa_df <- setNames(data.frame(pco_vectors), paste0("pcoa", 1:5))
+# 
+# pcoa_df$abx_recency <- groups # Add the additional column
+# pcoa_df$public_client_id <- filtered_metadata$public_client_id
+# 
+# # Save this df as a CSV to run in python regressions
+# write.csv(pcoa_df, "rh_abx_recency_pcoa_df_July2026.csv", row.names = FALSE)
+```
+
+
+```{r load.pcoa.result}
+# Remember this is not just the coordinates; it's the whole object (with eig)
+loaded_pcoa_result <- readRDS("data/rh_pcoa_result_July2026.rds")
+pcoa_df <- read.csv("data/rh_abx_recency_pcoa_df_July2026.csv", 
+                    colClasses = c(public_client_id = "character"))
+```
+
+Noirceeeee. 
+
+```{r calc.percent explained for plot}
+# Calculate the variance explained by each coordinate
+eigenvalues <- loaded_pcoa_result$eig
+total_variance <- sum(eigenvalues[eigenvalues > 0])
+percent_explained <- loaded_pcoa_result$eig / total_variance * 100
+```
+
+```{r}
+# Create the scatter plot
+# Here will just be looking at the first two coordinates
+# Round to nearest digit after decimal, format nsmall = display 1 digit after "."
+rounded_pe <- format(round(percent_explained[1:2], digits=1), nsmall=1)
+coord_one_lab <- c(glue("Pco 1 ({rounded_pe[1]}%)"))
+coord_two_lab <- c(glue("Pco 2 ({rounded_pe[2]}%)"))
+
+my_palette <- c(
+  "none" = "#007ea7", 
+  "twelve" = "#80ced7", 
+  "three" = "darkgrey"
+)
+```
+
+```{r, fig.width=6, fig.height=4}
+ordination_plot <- ggplot(
+  pcoa_df,
+  aes(x = pcoa1, y = pcoa2, color = abx_recency, fill = abx_recency)) +
+  stat_ellipse(geom  = "polygon", alpha = 0.1, show.legend = FALSE) +
+  geom_point(size = 3, alpha=0.8, shape= 21, stroke=0.6, color="black") +
+  scale_colour_manual(values = my_palette) +
+  scale_fill_manual(values = my_palette, guide = "none") +
+  labs(
+    title  = "PCoA",
+    x      = coord_one_lab,
+    y      = coord_two_lab,
+    color = "Antibiotic use recency") +
+  theme_minimal()
+ordination_plot
+ggsave(filename = "figures/rh_beta_diversity_pcoa_plot.pdf", plot = ordination_plot,
+       width = 6, height = 4, units = "in")
+```
+
+# PERMANOVA
+
+Now that we've made our plot and can see some group separation, we should test 
+to see if this is statistically significant.
+
+```{r add.stool.vendor}
+merged_metadata <- merge(pcoa_df,
+                         select(filtered_metadata, -abx_recency),
+                         by = "public_client_id")
+
+#saveRDS(merged_metadata, "data/merged_metadata_for_beta_div_PERMANOVA.rds")
+```
+
+Test!
+
+```{r permanova}
+merged_metadata$meds_blood_sugar <- factor(merged_metadata$meds_blood_sugar)
+merged_metadata$meds_cholesterol <- factor(merged_metadata$meds_cholesterol)
+merged_metadata$vendor_dashboard <- factor(merged_metadata$vendor_dashboard)
+
+set.seed(3)
+permanova_result <- adonis2(dist ~  age + sex + centered_BMI + 
+                          meds_blood_sugar + meds_cholesterol + vendor_dashboard +
+                          PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR + abx_recency, 
+                          data = merged_metadata, 
+                          permutations = 9999)
+print(permanova_result)
+#saveRDS(permanova_result, "data/beta_div_PERMANOVA_result.rds")
+```
+Now do the pairwise comparisons since this was significant!
+
+```{r pairwise.comparisons}
+# Turn this from being a large dist object to a matrix
+dist_matrix <- as.matrix(dist)
+
+# Make sure rownames also match in metadata
+rownames(merged_metadata) <- merged_metadata$public_client_id
+
+# This creates an empty table to store the data
+pairwise_results <- data.frame(  
+  group1 = character(),
+  group2 = character(),
+  R2 = numeric(),
+  pseudo_F = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop over all pairwise combinations
+groups <- unique(merged_metadata$abx_recency) # abx_recency == treatment
+
+for (i in 1:(length(groups) - 1)) {
+  for (j in (i + 1):length(groups)) {
+    g1 <- groups[i]
+    g2 <- groups[j]
+    
+    # This will subset to the groups you are comparing
+    subset_meta <- merged_metadata[merged_metadata$abx_recency %in% c(g1, g2), ]
+    subset_dist <- as.dist(dist_matrix[rownames(subset_meta), rownames(subset_meta)])
+    
+    result <- adonis2(subset_dist ~ age + sex + centered_BMI + 
+                          meds_blood_sugar + meds_cholesterol + vendor_dashboard +
+                          PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR + abx_recency,
+                      data = subset_meta, 
+                      permutations =9999)
+    p <- result$`Pr(>F)`[1]  
+    R2 <- result$`R2`[1]
+    pseudo_F <- result$`F`[1]
+
+    pairwise_results <- rbind(pairwise_results, data.frame(
+      group1 = g1,
+      group2 = g2,
+      p_value = p, 
+      R2 = R2, 
+      pseudo_F = pseudo_F))
+  }
+}
+
+# FDR correction
+pairwise_results$padj <- p.adjust(pairwise_results$p_value, method = "BH")
+
+#saveRDS(pairwise_results, "data/beta_div_PERMANOVA_result_pairwise.rds")
+```
+

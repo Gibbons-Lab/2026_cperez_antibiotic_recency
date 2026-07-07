@@ -1,0 +1,720 @@
+---
+title: "stool_repeat_clients_lmm"
+author: "Crystal Perez"
+date: "2026-04-06"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load.libraries, include=FALSE}
+# library("devtools"); install_github("lme4/lme4", dependencies=TRUE)
+library(lme4)
+library(emmeans)
+library(ggplot2)     # Plot residuals
+library(DHARMa)      # Model diagnostics
+library(performance) # Calculate VIF between fixed effect cols and ICC in LMM
+library(tidyverse)
+library(lmerTest)    # Generate p-values for F-test or t-test
+library(cowplot)
+
+packageVersion("lme4")
+```
+
+# Test differences in alpha diversity trajectories over time by abx use group
+## Read and format data
+
+```{r read.data.factor, include=FALSE}
+long_df = read.csv('data/stool_repeat_clients_long.csv',
+                  colClasses = c(public_client_id = "character"))
+
+# Want to make sure that categorical vars are factored properly
+long_df$sex <- factor(long_df$sex)
+long_df$meds_blood_sugar <- factor(long_df$meds_blood_sugar)
+long_df$meds_cholesterol <- factor(long_df$meds_cholesterol)
+long_df$abx_recency <- factor(long_df$abx_recency)
+long_df$vendor_dashboard <- factor(long_df$vendor_dashboard)
+
+# Let's mean center our age and GFR
+# redoing GFR because the slice of the data may be different
+long_df$centered_age <- long_df$age - mean(long_df$age)
+```
+
+```{r check.abx.ref, include=FALSE}
+levels(long_df$abx_recency) # Checking the "none" abx is the reference
+```
+
+```{r decompose.bmi}
+long_df$bmi_person_mean = ave(long_df$BMI_CALC, # For column BMI
+                      long_df$public_client_id, # Group by person
+                      FUN = mean) 
+
+# To find person-specific deviation of a particular time point
+long_df$bmi_within = (long_df$BMI_CALC -        # For each time point
+                      long_df$bmi_person_mean)  # Subtract person-mean
+
+
+# To compare from person to person 
+long_df$bmi_between = scale(long_df$bmi_person_mean, # Subtract grand-mean from person-mean
+                            scale=FALSE)             # Do not z-score
+```
+
+```{r create.time.window.var}
+long_df$time_100 <- long_df$dsb / 100
+```
+
+```{r set.up.models}
+outcomes = c('observed_features','berger_parker','shannon_index')
+
+time_by_abx = 'time_100*abx_recency'       # Use for interaction models
+time_plus_abx = 'time_100 + abx_recency'   # Remove interaction for LRT
+
+covars_no_time = c('centered_age', 'sex', 'meds_blood_sugar', 'meds_cholesterol', 'PC1',
+                   'PC2', 'PC3', 'PC4', 'PC5', 'centered_eGFR', 'vendor_dashboard',
+                   'bmi_within', 'bmi_between')
+```
+
+
+## Run models with interaction
+
+Going to try running the model with observed features to get a hang of model
+specification.
+
+```{r model.obs.test}
+mod_obs <- lmer(observed_features ~ time_100*abx_recency + sex + centered_age + 
+                  meds_blood_sugar + meds_cholesterol + centered_eGFR + 
+                  PC1 + PC2 + PC3 + PC4 + PC5 + vendor_dashboard + bmi_within + 
+                  bmi_between + (1 | public_client_id),
+             data=long_df)
+
+#summary(mod_obs)
+```
+
+```{r check.icc}
+icc(mod_obs)
+```
+Looks like around 70% of the variation is between people, so using the random intercept
+is helpful!
+
+### Vectorized below
+
+```{r run.int.models}
+models_interaction <- setNames(lapply(outcomes, function(outcome) {
+  fixed_terms <- c(time_by_abx, covars_no_time)
+  formula <- reformulate(fixed_terms, response = outcome)
+  mod <- lmer(update(formula, . ~ . + (1|public_client_id)), # Create model
+              data = long_df)
+  attr(mod, "outcome") <- outcome # Attach outcome name to the model
+  mod                             # Return the model object
+  }), 
+  outcomes)                   # Names the list index (uses setNames)
+  
+# formula(models_interaction$observed_features) # Used to see which formula was used
+```
+
+## Run models without interaction
+
+```{r run.add.models}
+models_additive <- setNames(lapply(outcomes, function(outcome) {
+  fixed_terms <- c(time_plus_abx, covars_no_time)
+  formula <- reformulate(fixed_terms, response = outcome)
+  mod <- lmer(update(formula, . ~ . + (1|public_client_id)), # Create model
+              data = long_df)
+  attr(mod, "outcome") <- outcome # Attach outcome name to the model
+  mod                             # Return the model object
+  }), 
+  outcomes)                   # Names the list index (uses setNames)
+```
+
+## Perform LRT
+
+```{r lrt.all.alphas}
+LRT_pvals <- setNames(sapply(outcomes, function(outcome) {
+  anova(
+    models_additive[[outcome]],
+    models_interaction[[outcome]]
+  )$`Pr(>Chisq)`[2]
+}), outcomes)
+
+LRT_pvals
+```
+
+```{r FDR.adjustment}
+# Extract just the numbers
+pvals_num <- unlist(LRT_pvals)   
+qvals <- p.adjust(pvals_num, method = "BH")
+
+results_lmm_alphas <- data.frame(
+  name = names(pvals_num),
+  p_value = pvals_num,
+  q_value = qvals
+)
+
+results_lmm_alphas
+```
+
+Awesome, looks like all of these meet q<0.1, suggesting that having the interaction
+between the time*group variable (i.e., different slopes for the antibiotic users)
+was helpful in modeling the data. This may suggest that the recovery trajectory 
+was different between the antibiotic use groups. Let's go ahead and look at the data
+some more. 
+
+## Interpretation
+
+```{r print.formula}
+formula(models_interaction$observed_features)
+```
+```{r get.estimates}
+models_interaction$observed_features
+```
+Looks like the average person in the reference/none group showed a slight
+decrease in the number of observed features over time. In particular, it's a decrease
+of -0.29 features over a period of 100 days. However, the individuals in the 
+antibiotic groups have a different slope.
+
+- **Three month group:**  -0.2916 + 1.1888  = 0.8972
+- **Twelve month group:** -0.2916 + 0.4788  = 0.1872
+
+In all cases, the magnitude of the change is quite small, but it is interesting
+that the change is greatest/most positive for the 3 month group.
+
+```{r}
+summary(models_interaction$observed_features)
+``` 
+
+
+## Let's plot it!
+
+```{r spaghetti.plot.draft}
+ggplot(long_df, 
+       aes(
+         x = time_100,
+         y = observed_features,
+         group = public_client_id, 
+         color=abx_recency)) +
+  geom_line(alpha = 0.1) + # Raw data lines
+  theme_minimal()
+```
+
+```{r obtain.emm}
+emm <- emmeans(models_interaction$observed_features, ~ abx_recency | time_100,
+               at = list(time_100 = seq(min(long_df$time_100), # evaluate between
+                                        max(long_df$time_100),
+                                        length.out = 50))) # 50 time points
+
+emm_df <- as.data.frame(emm)
+```
+
+```{r plot.emm}
+ggplot(emm_df, aes(x = time_100, y = emmean, color = abx_recency)) +
+  geom_line(linewidth = 1.3) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL, fill = abx_recency),
+              alpha = 0.2, color = NA) +
+  theme_minimal()
+```
+
+Okay let's put these together!
+
+```{r composite.plot, fig.width=5, fig.height=5}
+ggplot() +
+  # raw data
+  geom_point(data = long_df,
+            aes(x = time_100,
+                y = observed_features,
+                group = public_client_id,
+                color = abx_recency),
+            alpha = 0.5) +
+  
+  geom_line(data = long_df,
+            aes(x = time_100,
+                y = observed_features,
+                group = public_client_id,
+                color = abx_recency),
+            alpha = 0.17) +
+
+  # emmeans CI bands
+  geom_ribbon(data = emm_df,
+              aes(x = time_100, ymin = lower.CL, ymax = upper.CL, fill = abx_recency),
+              alpha = 0.25) +
+
+  # emmeans lines
+  geom_line(data = emm_df,
+            aes(x = time_100, y = emmean, color = abx_recency),
+            linewidth = 1.5) +
+  
+    scale_color_manual(values = c(
+    "none" = "#007ea7", 
+    "twelve" = "#80ced7", 
+    "three" = "darkgrey"
+  )) +
+
+  scale_fill_manual(values = c(
+    "none" = "#007ea7", 
+    "twelve" = "#80ced7", 
+    "three" = "darkgrey"
+  )) +
+  
+  labs(x = 'Time since baseline (per 100 days)', y = 'Observed Features') +
+  
+  #theme_dark()
+
+  theme_minimal()
+```
+```{r}
+plot(emm, comparisons = TRUE)
+```
+
+
+## Assess model assumptions
+
+```{r check.VIF}
+check_collinearity(models_interaction$observed_features)
+```
+```{r plot.resid.function}
+plot_residuals <- function(model) {
+  df <- data.frame(
+    Fitted = fitted(model),
+    Residuals = residuals(model, type = "pearson")
+  )
+  
+  outcome_name <- attr(model, "outcome")
+  
+  ggplot(df, aes(x = Fitted, y = Residuals)) +
+    geom_point(alpha = 0.6) +
+    geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+    theme_minimal() +
+    labs(
+      title = paste("Residuals vs Fitted:", outcome_name),
+      x = "Fitted values",
+      y = "Pearson residuals"
+    ) +
+    theme(plot.title = element_text(size=10, color = "blue"))
+}
+```
+
+
+```{r plot.lca.models}
+model_list <- models_interaction             # List of LCA models
+plots_resids <- lapply(model_list, plot_residuals)  # Individual plots
+
+# Combine plots into a single figure
+combined_plot <- plot_grid(plotlist = plots_resids, ncol = 3)
+
+combined_plot # Display
+```
+# Test dietary behavior as a moderator of abx:time
+
+## Starting with a model using baseline and follow-up dietary questionnaires
+
+Unfortunately, not everyone filled out the dietary questionnaire a second time, 
+so I don't really expect to see much, but we can see! For now let's only start 
+by testing observed features.
+
+```{r diet.base.follow}
+diet_df = read.csv('data/stool_diet_followup.csv',
+                  colClasses = c(public_client_id = "character"))
+
+# Want to make sure that categorical vars are factored properly
+diet_df$sex <- factor(diet_df$sex)
+diet_df$meds_blood_sugar <- factor(diet_df$meds_blood_sugar)
+diet_df$meds_cholesterol <- factor(diet_df$meds_cholesterol)
+diet_df$abx_recency <- factor(diet_df$abx_recency)
+diet_df$vendor_dashboard <- factor(diet_df$vendor_dashboard)
+
+# Let's mean center our age and GFR
+# redoing GFR because the slice of the data may be different
+diet_df$centered_age <- diet_df$age - mean(diet_df$age)
+
+diet_df$time_100 <- diet_df$dsb / 100
+```
+
+```{r diet.decomp.bmi}
+diet_df$bmi_person_mean = ave(diet_df$BMI_CALC, # For column BMI
+                      diet_df$public_client_id, # Group by person
+                      FUN = mean) 
+
+# To find person-specific deviation of a particular time point
+diet_df$bmi_within = (diet_df$BMI_CALC -        # For each time point
+                      diet_df$bmi_person_mean)  # Subtract person-mean
+
+
+# To compare from person to person 
+diet_df$bmi_between = scale(diet_df$bmi_person_mean, # Subtract grand-mean from person-mean
+                            scale=FALSE)             # Do not z-score
+```
+
+Now we should also make sure to decouple the between and within time variance
+for the dietary variables of interest. Also, the diet columns were not filled out
+to the same extent, so we will have to make sub-datasets to drop NAs. 
+
+```{r generate.sub.data.numeric}
+diet_vars = c('breakfast', 'cruciferous_vegetables_frequency', 'snack',
+              'fruits_per_day', 'vegetables_per_day', 'sugary_drinks_per_day',
+              'alcohol_drinks_a_day', 'grains_per_day')
+
+exposure = 'abx_recency'
+
+covars = c('centered_age', 'sex', 'bmi_within', 'bmi_between',
+           'meds_blood_sugar', 'meds_cholesterol', 
+           'PC1', 'PC2', 'PC3', 'PC4', 'PC5', 'centered_eGFR', 
+           'vendor', 'vendor_dashboard',  # For diet and stool, respectively
+           'time_100')
+
+
+# Let's vectorize creating all of our sub-datasets
+subdat_diet_vars <- lapply(diet_vars, function(diet_var) {
+  diet_df[complete.cases(diet_df[, c(exposure, covars, diet_var)]), ]
+})
+
+names(subdat_diet_vars) <- diet_vars # Name them
+```
+
+```{r decompose.cruciferous}
+subdat_diet_vars$cruciferous_vegetables_frequency$avg_cru_freq = ave(
+  subdat_diet_vars$cruciferous_vegetables_frequency$cruciferous_vegetables_frequency, # For column
+  subdat_diet_vars$cruciferous_vegetables_frequency$public_client_id, # Group by person
+  FUN = mean) 
+
+# To find person-specific deviation of a particular time point
+subdat_diet_vars$cruciferous_vegetables_frequency$cru_freq_within = (
+  # For each time point
+  subdat_diet_vars$cruciferous_vegetables_frequency$cruciferous_vegetables_frequency - 
+ subdat_diet_vars$cruciferous_vegetables_frequency$avg_cru_freq)  # Subtract person-mean
+
+
+# To compare from person to person 
+subdat_diet_vars$cruciferous_vegetables_frequency$cru_freq_between = scale(
+  # Subtract grand-mean from person-mean
+  subdat_diet_vars$cruciferous_vegetables_frequency$avg_cru_freq, 
+  scale=FALSE)             # Do not z-score
+```
+
+
+```{r test.obs.cruc}
+mod_obs <- lmer(observed_features ~ time_100*abx_recency + 
+                  time_100*cru_freq_between*abx_recency +
+                  sex + centered_age + 
+                  meds_blood_sugar + meds_cholesterol + centered_eGFR + 
+                  PC1 + PC2 + PC3 + PC4 + PC5 + vendor_dashboard + bmi_within + 
+                  bmi_between + (1 | public_client_id),
+             data=subdat_diet_vars$cruciferous_vegetables_frequency)
+
+summary(mod_obs)
+```
+
+## Shift to looking at dietary behaviors at baseline: CONTINUOUS
+
+This question would hopefully address how the dietary behaviors of individuals
+at the beginning of the Arivale program affected their recovery trajectory over
+time. I will only be testing observed features as an outcome as this seems to be
+the most sensitive metric. 
+
+```{r read.data.diet.baseline}
+diet_base = read.csv('data/stool_repeat_diet_baseline_only.csv',
+                     colClasses = c(public_client_id = "character"), 
+                     na.strings = c("", "NA"))
+```
+
+```{r clean.vars.again}
+# Want to make sure that categorical vars are factored properly
+diet_base$sex <- factor(diet_base$sex)
+diet_base$meds_blood_sugar <- factor(diet_base$meds_blood_sugar)
+diet_base$meds_cholesterol <- factor(diet_base$meds_cholesterol)
+diet_base$abx_recency <- factor(diet_base$abx_recency)
+diet_base$vendor_dashboard <- factor(diet_base$vendor_dashboard) # Microbiome
+diet_base$vendor <- factor(diet_base$vendor)                     # Diet Questionnaire
+diet_base$alcohol_type <- factor(diet_base$alcohol_type)
+
+# Let's mean center our age and GFR
+# redoing GFR because the slice of the data may be different
+diet_base$centered_age <- diet_base$age - mean(diet_base$age)
+
+diet_base$time_100 <- diet_base$dsb / 100
+```
+
+```{r decompose.bmi.again}
+diet_base$bmi_person_mean = ave(diet_base$BMI_CALC, # For column BMI
+                      diet_base$public_client_id, # Group by person
+                      FUN = mean) 
+
+# To find person-specific deviation of a particular time point
+diet_base$bmi_within = (diet_base$BMI_CALC -        # For each time point
+                      diet_base$bmi_person_mean)  # Subtract person-mean
+
+
+# To compare from person to person 
+diet_base$bmi_between = scale(diet_base$bmi_person_mean, # Subtract grand-mean from person-mean
+                            scale=FALSE)             # Do not z-score
+```
+
+```{r check.alc.preference.coding}
+levels(diet_base$alcohol_type)
+```
+
+```{r}
+diet_vars = c('breakfast', 'cruciferous_vegetables_frequency',
+              'fruits_per_day', 'vegetables_per_day', 'sugary_drinks_per_day',
+              'alcohol_drinks_a_day', 'grains_per_day', 'alcohol_type')
+
+covars_no_time = c('centered_age', 'sex', 'meds_blood_sugar', 'meds_cholesterol',
+                   'PC1','PC2', 'PC3', 'PC4', 'PC5', 'centered_eGFR', 'vendor',
+                   'vendor_dashboard','bmi_within', 'bmi_between')
+```
+
+```{r nas.in.diet.vars}
+na_counts_outcomes <- colSums(is.na(diet_base[, diet_vars]))
+print(na_counts_outcomes)
+```
+Awesome; now that we've looked through the data, we can start fitting models.
+
+### Three-way interaction models
+
+Do any of these dietary behaviors affect the recovery from antibiotics over time?
+
+```{r int.models.diet}
+models_diet_int <- setNames(
+  lapply(diet_vars, function(mod) {    # mod for moderator
+    # Build formula
+    interaction_term <- paste0("time_100 * abx_recency * ", mod)
+    right_hand <- c(interaction_term, covars_no_time)
+    formula <- reformulate(right_hand, response = "observed_features")
+    # Fit and name model
+    model <- lmer(update(
+      formula, . ~ . + (1 | public_client_id)), data = diet_base)
+    attr(model, "moderator") <- mod
+    model                              # Returns model object              
+  }),
+  diet_vars
+)
+
+# formula(models_LCA_interaction$OXLDL) # Used to see which formula was used
+```
+
+### Additive model
+This specifically removes the three-way interactions while still allowing for 
+the two-way interactions.
+
+```{r mod.diet.add}
+models_diet_add <- setNames(
+  lapply(diet_vars, function(mod) {
+    # Build all 2-way terms manually
+    right_hand <- c(
+      "time_100 * abx_recency",
+      paste0("time_100 * ", mod),
+      paste0("abx_recency * ", mod),
+      covars_no_time
+    )
+    formula <- reformulate(right_hand, response = "observed_features")
+    
+    # Fit and name models
+    model <- lmer(update(formula, . ~ . + (1 | public_client_id)),
+                  data = diet_base)
+    attr(model, "moderator") <- mod
+    model
+  }),
+  diet_vars
+)
+```
+
+### Perform LRT for diet models
+
+```{r lrt.function}
+lrt_results_diet <- mapply(function(reduced, full) {
+  anova(reduced, full)
+}, models_diet_add, models_diet_int, SIMPLIFY = FALSE)
+```
+
+
+```{r build.q.df}
+pvals_diet <- sapply(lrt_results_diet, function(x) x$`Pr(>Chisq)`[2])
+
+# Extract just the numbers
+pvals_num_diet <- unlist(pvals_diet)   
+qvals_diet <- p.adjust(pvals_num_diet, method = "BH")
+
+results_lmm_diet <- data.frame(
+  name = names(pvals_num_diet),
+  p_value = pvals_num_diet,
+  q_value = qvals_diet
+)
+
+results_lmm_diet[order(results_lmm_diet$q_value), ]
+```
+
+Take a look sat fruit in more detail.
+
+```{r}
+mod_obs <- lmer(observed_features ~ time_100*abx_recency*fruits_per_day + 
+                  sex + centered_age + meds_blood_sugar + meds_cholesterol +
+                  centered_eGFR + PC1 + PC2 + PC3 + PC4 + PC5 + bmi_within + 
+                  bmi_between + vendor + vendor_dashboard  + (1 | public_client_id),
+             data=diet_base)
+summary(mod_obs)
+```
+
+```{r em.trends.cont.fruit}
+emtrends(models_diet_int$fruits_per_day,
+         ~ abx_recency * fruits_per_day,
+         var = "time_100")
+```
+## Binarized dietary variables
+
+```{r read.binarized}
+diet_binarized = read.csv('data/stool_repeats_diet_binarized.csv',
+                     colClasses = c(public_client_id = "character"), 
+                     na.strings = c("", "NA"))
+
+# Want to make sure that categorical vars are factored properly
+diet_binarized$sex <- factor(diet_binarized$sex)
+diet_binarized$meds_blood_sugar <- factor(diet_binarized$meds_blood_sugar)
+diet_binarized$meds_cholesterol <- factor(diet_binarized$meds_cholesterol)
+diet_binarized$abx_recency <- factor(diet_binarized$abx_recency)
+diet_binarized$vendor_dashboard <- factor(diet_binarized$vendor_dashboard) # Microbiome
+diet_binarized$vendor <- factor(diet_binarized$vendor)                     # Diet Questionnaire
+diet_binarized$alcohol_type <- factor(diet_binarized$alcohol_type)
+diet_binarized$fruits_per_day_binary <- factor(diet_binarized$fruits_per_day_binary)
+
+
+# Let's mean center our age and GFR
+# redoing GFR because the slice of the data may be different
+diet_binarized$centered_age <- diet_binarized$age - mean(diet_binarized$age)
+
+diet_binarized$time_100 <- diet_binarized$dsb / 100
+```
+
+```{r decompose.bmi.bin}
+diet_binarized$bmi_person_mean = ave(diet_binarized$BMI_CALC, # For column BMI
+                      diet_binarized$public_client_id, # Group by person
+                      FUN = mean) 
+
+# To find person-specific deviation of a particular time point
+diet_binarized$bmi_within = (diet_binarized$BMI_CALC -        # For each time point
+                             diet_binarized$bmi_person_mean)  # Subtract person-mean
+
+
+# To compare from person to person 
+diet_binarized$bmi_between = scale(diet_binarized$bmi_person_mean, # Subtract grand-mean from person-mean
+                             scale=FALSE)             # Do not z-score
+```
+
+
+```{r check.alc.levels.binary}
+levels(diet_binarized$alcohol_type)
+```
+
+```{r model.vars.binary}
+diet_vars = c('fruits_per_day_binary','vegetables_per_day_binary',
+              'sugary_drinks_per_day_binary','alcohol_drinks_a_day_binary',
+              'grains_per_day_binary','cruciferous_vegetables_frequency_binary',
+              'breakfast_binary','snack_binary','alcohol_type')
+
+covars_no_time = c('centered_age', 'sex', 'meds_blood_sugar', 'meds_cholesterol',
+                   'PC1','PC2', 'PC3', 'PC4', 'PC5', 'centered_eGFR', 'vendor',
+                   'vendor_dashboard','bmi_within', 'bmi_between')
+```
+
+## Alright, time to fit our models!
+
+### Interaction
+
+```{r models.int.binary}
+models_diet_int_binary <- setNames(
+  lapply(diet_vars, function(mod) {    # mod for moderator
+    # Build formula
+    interaction_term <- paste0("time_100 * abx_recency * ", mod)
+    right_hand <- c(interaction_term, covars_no_time)
+    formula <- reformulate(right_hand, response = "observed_features")
+    # Fit and name model
+    model <- lmer(update(
+      formula, . ~ . + (1 | public_client_id)), data = diet_binarized)
+    attr(model, "moderator") <- mod
+    model                              # Returns model object              
+  }),
+  diet_vars
+)
+```
+
+### Fit additive model
+
+```{r model.add.binary}
+models_diet_add_binary <- setNames(
+  lapply(diet_vars, function(mod) {
+    # Build all 2-way terms manually
+    right_hand <- c(
+      "time_100 * abx_recency",
+      paste0("time_100 * ", mod),
+      paste0("abx_recency * ", mod),
+      covars_no_time
+    )
+    formula <- reformulate(right_hand, response = "observed_features")
+    
+    # Fit and name models
+    model <- lmer(update(formula, . ~ . + (1 | public_client_id)),
+                  data = diet_binarized)
+    attr(model, "moderator") <- mod
+    model
+  }),
+  diet_vars
+)
+```
+
+
+```{r lrt.diet.binary}
+lrt_results_diet_binary <- mapply(function(reduced, full) {
+  anova(reduced, full)
+}, models_diet_add_binary, models_diet_int_binary, SIMPLIFY = FALSE)
+```
+```{r check.results.binary}
+pvals_diet_binary <- sapply(lrt_results_diet_binary, function(x) x$`Pr(>Chisq)`[2])
+
+# Extract just the numbers
+pvals_num_diet_binary <- unlist(pvals_diet_binary)   
+qvals_diet_binary <- p.adjust(pvals_num_diet_binary, method = "BH")
+
+results_lmm_diet_binary <- data.frame(
+  name = names(qvals_diet_binary),
+  p_value = pvals_num_diet_binary,
+  q_value = qvals_diet_binary
+)
+
+results_lmm_diet_binary[order(results_lmm_diet_binary$q_value), ]
+```
+Alright, looks like none of the binarized dietary variables significantly modifies
+the trajectory over time for the antibiotic users. This is not entirely surprising
+though as the `time_100`*`abx_recency` interaction term was small to begin with (so
+we are estimating a small change of an already small change)
+
+```{r}
+emtrends(models_diet_int_binary$alcohol_type,
+         ~ abx_recency * alcohol_type,
+         var = "time_100")
+```
+
+
+```{r}
+# eventually we want emmeans
+emm_fruit <- emmeans(models_diet_int_binary$fruits_per_day_binary,
+               ~ abx_recency * fruits_per_day_binary | time_100,
+               at = list(time_100 = seq(0, max(diet_binarized$time_100), length.out = 50)))
+
+emm_fruit_df <- as.data.frame(emm_fruit)
+```
+
+
+```{r}
+ggplot() +
+  geom_line(data = diet_binarized,
+            aes(x = time_100, y = observed_features, group = public_client_id, color = abx_recency),
+            alpha = 0.15) +
+
+  geom_line(data = emm_fruit_df,
+            aes(x = time_100, y = emmean, color = abx_recency),
+            size = 1.2) +
+
+  facet_wrap(~ fruits_per_day_binary) +
+  theme_minimal()
+```
+

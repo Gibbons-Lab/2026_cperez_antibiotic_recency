@@ -1,0 +1,103 @@
+---
+title: "metabs_heatmaps"
+author: "Crystal Perez"
+date: "2025-07-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ComplexHeatmap)
+library(circlize)  # for color functions
+library(dplyr)
+```
+
+```{r read.data}
+metabs_betas = read.csv("rh_metabs_betas.csv")
+q_values = read.csv("rh_metabs_qs.csv")
+
+rownames(metabs_betas) = metabs_betas$CHEMICAL_NAME
+metabs_betas$CHEMICAL_NAME <- NULL
+
+rownames(q_values) = q_values$CHEMICAL_NAME
+q_values$CHEMICAL_NAME <- NULL
+```
+
+
+```{r sort.rename.cols}
+metabs_betas_sorted <- metabs_betas[order(metabs_betas[, "abx_three"],
+                                            decreasing = TRUE), ]
+
+rename_vec <-  c(
+    abx_three = "Antibiotics 0 - 3 mo.",
+    abx_twelve = "Antibiotics 3 - 12 mo."
+  )
+
+colnames(metabs_betas_sorted) <- recode(colnames(metabs_betas_sorted),
+                                         !!!rename_vec)
+```
+
+
+```{r set.up.significance}
+# Significance annotation logic
+stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  if (p < 0.1)  return("#")
+  return("")
+}
+```
+
+
+## Set up for heatmap
+
+```{r, define.color.columns}
+beta_col_fun <- colorRamp2(c(-0.5, 0, 0.5), c("blue", "white", "red")) #"#FFF0F5"
+
+beta_cols <- c("Antibiotics 0 - 3 mo.",
+               "Antibiotics 3 - 12 mo.")
+
+beta_matrix <- as.matrix(metabs_betas_sorted[, beta_cols])
+rownames(beta_matrix) <- rownames(metabs_betas_sorted)
+q_matrix <- as.matrix(q_values)
+qval_mat <- q_matrix[rownames(beta_matrix), ]
+```
+
+```{r heatmap.plot, fig.height=8, fig.width=7}
+# Plot heatmap with split and color legend
+ht_beta <- Heatmap(beta_matrix,
+                   name = "Beta coefficient",
+                   heatmap_legend_param = list(
+                     title = "Beta coefficient",
+                     title_position = "leftcenter-rot"),
+                   col = beta_col_fun,
+                   na_col = "#C0C0C0",
+                   column_names_rot = 45,
+                   column_names_gp = gpar(fontsize = 10),
+                   column_gap = unit(2, "mm"),
+                   cluster_rows = FALSE,
+                   cluster_columns = FALSE,
+                   show_row_names = TRUE, 
+                   row_names_side = "left", 
+                   row_names_gp = gpar(fontsize = 10),
+                   height = unit(nrow(metabs_betas_sorted) * 5, "mm"),
+                   width = unit(30, "mm"),
+                   rect_gp = gpar(col = "#696969", lwd = 1),
+                   cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- qval_mat[i, j]
+                     star <- stars(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 12, col = "black"))}
+                   )
+
+ht_beta 
+```
+
+```{r save.fig}
+# png("figures/metab_heatmap_sorted_three_mo.png",
+#     width = 1350, height = 1950, res = 300)
+# draw(ht_beta)
+# dev.off()
+```
+

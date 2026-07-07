@@ -1,0 +1,9 @@
+data/
+figures/
+metacardis_data/
+__pycache__/
+.ipynb_checkpoints/
+*.tar
+.nextflow*
+*.log
+*.RData

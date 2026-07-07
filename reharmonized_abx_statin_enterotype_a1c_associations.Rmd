@@ -1,0 +1,268 @@
+---
+title: "abx_statin_enterotype_a1c_associations"
+author: "Crystal Perez"
+date: "2026-06-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Perform associations between enterotypes, medication use, and health outcomes
+
+Enterotypes were assigned in `arivale_statins_enterotypes.Rmd`. Now let's merge
+some health data and continue our associations. 
+
+## Set up and process data
+
+```{r load.libraries}
+library(dplyr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(nnet)
+library(networkD3)
+library(htmlwidgets)
+library(ggpubr)
+library(purrr)
+library(broom)
+library(tidyr)
+library(emmeans)
+library(ggpubr)
+```
+
+```{r read.data}
+abx_cohort = read.csv('../data/reharmonized_microbes_clr.csv',
+                         colClasses = c(public_client_id = "character"))
+```
+
+Factor relevant variables
+
+```{r factor.vars}
+# Factor variables
+abx_cohort$sex <- factor(abx_cohort$sex)                       # Sex
+abx_cohort$statin_binary <- factor(abx_cohort$statin_binary)   # Statin use
+
+abx_cohort$vendor_dashboard <- factor(
+  abx_cohort$vendor_dashboard)                                 # Microbiome vendor
+abx_cohort$vendor <- factor(abx_cohort$vendor)                 # Clinical chem vendor
+
+abx_cohort$abx_recency <- factor(abx_cohort$abx_recency, 
+  levels=c("none", "twelve", "three"))                         # Abx recency
+
+abx_cohort <- abx_cohort %>% mutate(
+  abx_year = ifelse(abx_recency == "none", 0, 1)
+)
+
+abx_cohort$abx_year <- factor(abx_cohort$abx_year)
+
+abx_cohort <- abx_cohort %>% rename(Bacteroides = Bacteria_Bacteroidetes_Bacteroidia_Bacteroidales_Bacteroidaceae_Bacteroides)
+```
+
+
+For this analysis, we will want to remove those who use blood sugar lowering 
+medications and are outliers in HbA1c (in case individuals mistakingly reported 
+"no" or just have yet to get a formal diagnosis).
+
+```{r check.glucose.med.users}
+table(abx_cohort$meds_blood_sugar)
+```
+
+```{r remove.glucose.meds}
+abx_cohort_no_gmeds <- abx_cohort %>% filter(meds_blood_sugar == "No")
+abx_cohort_no_outliers <- abx_cohort_no_gmeds %>%
+  filter(
+    is.na(GLYCOHEMOGLOBINA1C) | (
+      GLYCOHEMOGLOBINA1C >= (
+        quantile(GLYCOHEMOGLOBINA1C, 0.25, na.rm = TRUE) - 1.5 * IQR(GLYCOHEMOGLOBINA1C, na.rm = TRUE)) &
+      GLYCOHEMOGLOBINA1C <= (
+        quantile(GLYCOHEMOGLOBINA1C, 0.75, na.rm = TRUE) + 1.5 * IQR(GLYCOHEMOGLOBINA1C, na.rm = TRUE))
+    )
+  )
+```
+
+
+```{r}
+table(abx_cohort_no_outliers$abx_year, abx_cohort_no_outliers$statin_binary)
+```
+```{r bacteroides.reg}
+bac_clr_reg_statins <- lm(Bacteroides ~
+    age + sex + centered_eGFR + vendor_dashboard + 
+    PC1 + PC2 + PC3 + PC4 + PC5 + BMI_CALC +
+    abx_recency*statin_binary,
+  data = abx_cohort_no_outliers)
+
+summary(bac_clr_reg_statins)
+```
+
+
+```{r ldl.reg}
+LDL_reg <- lm(LDL_CHOLCALCULATION ~
+    age + sex + centered_eGFR + vendor_dashboard + 
+    PC1 + PC2 + PC3 + PC4 + PC5 + BMI_CALC + 
+      Bacteroides*abx_year*statin_binary,
+  data = abx_cohort_no_outliers)
+
+summary(LDL_reg)
+```
+
+# Let's add HMG data to maybe use at a surrogate for efficacy
+
+```{r}
+# Look at HMG instead of LDL to see if that's a better marker of efficacy
+mets <- read.csv("../data/metabolites_merged_used_for_regressions.csv",
+                 colClasses = c(public_client_id = "character"))
+
+hmg_df <- mets[, c("public_client_id", "metabolite_112")] # 3-hydroxy-3-methylglutarate
+
+abx_cohort_hmg <- merge(abx_cohort_no_outliers, hmg_df, by = "public_client_id")
+
+# One pooled model with the interaction
+hmg_int <- lm(metabolite_112 ~
+    age + sex + centered_eGFR + vendor_dashboard +
+    PC1 + PC2 + PC3 + PC4 + PC5 + BMI_CALC +
+    Bacteroides*abx_year*statin_binary,
+  data = abx_cohort_hmg)
+
+summary(hmg_int)
+```
+Look at relationship between LDL and biomarker
+
+```{r ldl.hmg.plot}
+ggplot(
+  abx_cohort_hmg,
+  aes(
+    metabolite_112,
+    LDL_CHOLCALCULATION)) +
+  geom_jitter() +
+  labs(title = "HMG effect on LDL split by statin use") +
+  geom_smooth(method="lm") +
+  facet_wrap(vars(statin_binary)) +
+  stat_cor(method = "spearman")
+```
+
+
+```{r hba1c.reg}
+hba1c_reg <- lm(GLYCOHEMOGLOBINA1C ~
+    age + sex + centered_eGFR + vendor_dashboard + vendor + 
+    PC1 + PC2 + PC3 + PC4 + PC5 + BMI_CALC + Bacteroides*statin_binary*abx_year,
+  data = abx_cohort_no_outliers)
+
+summary(hba1c_reg)
+```
+
+```{r plot.hba1c}
+ggplot(
+  abx_cohort_no_outliers,
+  aes(
+    Bacteroides,
+    GLYCOHEMOGLOBINA1C,
+    color=abx_year)
+  ) +
+  geom_jitter() +
+  geom_smooth(method="lm") +
+  facet_wrap(vars(statin_binary)) +
+  stat_cor(method = "spearman")
+```
+
+Hypothesis: abx should make both off and on targets more extreme
+but perhaps they just make off targets worse? Or is that just a correlate of being
+sick?
+
+```{r}
+# Look at LDL
+ggplot(
+  abx_cohort_no_outliers,
+  aes(
+    Bacteroides,
+    LDL_CHOLCALCULATION, 
+    color=abx_year)
+  ) +
+  geom_jitter() +
+  geom_smooth(method="lm") +
+  facet_wrap(vars(statin_binary)) +
+  stat_cor(method = "spearman")
+```
+
+# What about re-creating ribbon plot with Bacteroides counts
+
+
+```{r create.med.context}
+# This will paste the text along with the variable condition
+# None will be -
+# Users will be +
+abx_cohort$med_context <- paste0(
+  "abx ", ifelse(abx_cohort$abx_recency == "none", "-", "+"), " / ",
+  "statin ", ifelse(abx_cohort$statin_binary == 1, "+", "-")
+)
+
+abx_cohort$med_context <- factor(abx_cohort$med_context)
+```
+
+
+```{r recreate.ribbon.plot.bac.counts.entero}
+set.seed(42) # abx_entero_labs_bac_hmg
+
+ent_levels <- levels(abx_entero_labs_bac_hmg$enterotype)
+
+# We predict enterotype probabilities across BMI
+fit <- multinom(enterotype ~ bacteroides_counts_rarefied,
+                data = abx_entero_labs_bac_hmg, trace = FALSE)
+
+# Make our grid represent BMI values we have
+grid <- data.frame(bacteroides_counts_rarefied = seq(
+  min(abx_entero_labs_bac_hmg$bacteroides_counts_rarefied),
+  max(abx_entero_labs_bac_hmg$bacteroides_counts_rarefied),
+  length.out = 100))
+
+# Compute probabilies
+pp <- as.data.frame(
+  predict(fit, newdata = grid, type = "probs")
+  )[, ent_levels]
+
+cum  <- t(apply(pp, 1, cumsum))
+
+ribbon <- do.call(rbind, lapply(seq_along(ent_levels), function(i) {
+  data.frame(x = grid$bacteroides_counts_rarefied,
+             ymin = if (i == 1) 0 else cum[, i-1],
+             ymax = cum[, i],
+             enterotype = ent_levels[i])
+}))
+
+ribbon$enterotype <- factor(ribbon$enterotype, levels = ent_levels)
+
+band_y <- function(xval, et) {
+  sub <- ribbon[ribbon$enterotype == et, ]
+  i   <- which.min(abs(sub$x - xval))
+  runif(1, sub$ymin[i] + 0.01, sub$ymax[i] - 0.01)
+}
+
+abx_entero_labs_bac_hmg$y <- mapply(
+  band_y,
+  abx_entero_labs_bac_hmg$bacteroides_counts_rarefied,
+  as.character(abx_entero_labs_bac_hmg$enterotype))
+
+ent_fills  <- c("Prev"="yellowgreen","Rum"="#FAD7A0","Bac1"="#91c4bf","Bac2"="thistle")
+ent_points <- c("Prev"="#1E8449","Rum"="#E67E22","Bac1"="#088888","Bac2"="#A280AE")
+
+# make sure factor levels match in BOTH frames
+ribbon$enterotype <- factor(ribbon$enterotype, levels = ent_levels)
+abx_entero_labs_bac_hmg$enterotype <- factor(abx_entero_labs_bac_hmg$enterotype,
+                                           levels = ent_levels)
+
+ggplot() +
+  # layer 1: the fitted bands (800-row grid df)
+  geom_ribbon(data = ribbon,
+              aes(x = x, ymin = ymin, ymax = ymax, fill = enterotype),
+              alpha = 0.55) +
+  # layer 2: your actual subjects (1666-row df)
+  geom_point(data = abx_entero_labs_bac_hmg,
+             aes(x = bacteroides_counts_rarefied, y = y, colour = enterotype),
+             size = 1.3, alpha = 0.8) +
+  scale_fill_manual("Enterotypes:", values = ent_fills, breaks = rev(ent_levels)) +
+  scale_colour_manual(values = ent_points, guide = "none") +
+  scale_y_continuous("Enterotype prevalence (stacked)",
+                     limits = c(0,1), breaks = seq(0,1,0.2), expand = c(0,0)) +
+  scale_x_continuous("Bacteroides Counts Rarefied") +
+  theme_classic(base_size = 12)
+```
