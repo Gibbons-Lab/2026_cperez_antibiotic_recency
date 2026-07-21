@@ -1,14 +1,19 @@
 import pandas as pd
 import numpy as np
+
 from rich.progress import track
 import statsmodels.api as sm
 from statsmodels.formula.api import ols
 from statsmodels.stats.multitest import multipletests
+from scipy import stats
+
 from patsy import dmatrices
+from patsy import dmatrix
 import plotly.io as pio
 import plotly.express as px
 import plotly.graph_objects as go
 #pio.get_chrome()
+
 
 def get_results(feature, df, formula_template, term_of_interest):
     """
@@ -356,11 +361,6 @@ def make_barbell_plot(metabolite, data_raw, data_tests):
     fig.write_image(f"figures/microbe_metab_{metabolite}_interactions_mean_difference.pdf", width=700, height=110 + (20 * len(barbell_data_absent))) 
     fig.show() 
 
-import numpy as np
-import pandas as pd
-from patsy import dmatrix
-from scipy import stats
-from statsmodels.stats.multitest import multipletests
 
 def fast_interaction_screen(metabolites, data, outcome_var,
                             include_vendor=True, min_n=30, robust=False):
@@ -441,3 +441,92 @@ def fast_interaction_screen(metabolites, data, outcome_var,
     if not out.empty:
         out["q_value"] = multipletests(out["p_value"], method="fdr_bh")[1]  # within-chemistry
     return out
+
+def make_slope_barbell(data_raw, data_tests, covariates,
+                       abx_col="abx_year", name_col="CHEMICAL_NAME",
+                       out_pdf="figures/abx_metab_chem_slope_barbell.pdf"):
+    """Build the combined barbell figure across ALL chemistries with hits.
+
+    data_raw   : merged per-person frame (chemistries + metabolites + covariates + abx_col)
+    data_tests : the significant-hits table (needs columns: chemistry, metabolite; and
+                 optionally name_col for a pretty metabolite label)
+    covariates : list of RHS terms, e.g.
+                 ["C(sex)", "age", "BMI_CALC", "C(meds_cholesterol)",
+                  "C(meds_blood_sugar)", "PC1","PC2","PC3","PC4","PC5",
+                  "centered_eGFR", "C(vendor)"]
+    """
+    # map abx_col to 0/1 (handles "none"/"past_year" strings OR existing 0/1)
+    raw = data_raw.copy()
+    if raw[abx_col].dtype == object:
+        raw["_abx01"] = (raw[abx_col] != "none").astype(int)
+    else:
+        raw["_abx01"] = raw[abx_col].astype(int)
+
+    rows = []
+    for _, hit in data_tests.iterrows():
+        chem, metab = hit["chemistry"], hit["metabolite"]
+        label = hit[name_col] if name_col in data_tests.columns else metab
+        is_ctrl = str(metab).lower() == str(chem).lower()   # self-pair positive control
+        for g in (0, 1):
+            sub = raw[raw["_abx01"] == g]
+            rows.append({
+                "chemistry": chem,
+                "metabolite": metab,
+                "row_label": f"{label} (+ctrl)" if is_ctrl else label,
+                "is_ctrl": is_ctrl,
+                "abx": g,
+                "slope": _adjusted_std_slope(sub, chem, metab, covariates),
+            })
+    bar = pd.DataFrame(rows).dropna(subset=["slope"])
+
+    # y-order: group by chemistry, then by the interaction gap within chemistry
+    gap = (bar.pivot_table(index=["chemistry", "row_label"], columns="abx",
+                           values="slope")
+              .assign(gap=lambda t: t[1] - t[0])
+              .reset_index())
+    gap = gap.sort_values(["chemistry", "gap"])
+    y_order = (gap["chemistry"] + " | " + gap["row_label"]).tolist()
+    bar["y"] = bar["chemistry"] + " | " + bar["row_label"]
+
+    fig = go.Figure()
+
+    # connecting bars first (so dots sit on top)
+    for y in bar["y"].unique():
+        s = bar[bar["y"] == y]
+        if len(s) == 2:
+            fig.add_shape(type="line", layer="below",
+                          y0=y, x0=s[s.abx == 0]["slope"].values[0],
+                          y1=y, x1=s[s.abx == 1]["slope"].values[0],
+                          line=dict(color="lightgrey", width=2))
+
+    # dots, one trace per abx group; diamonds for positive controls
+    for g in (0, 1):
+        d = bar[bar["abx"] == g]
+        fig.add_trace(go.Scatter(
+            x=d["slope"], y=d["y"], mode="markers",
+            name=("none" if g == 0 else "past_year"),
+            marker=dict(
+                size=9, color=abx_year_pal[g],
+                symbol=np.where(d["is_ctrl"], "diamond", "circle"),
+                line=dict(width=1, color="black"),
+            ),
+        ))
+
+    fig.update_layout(
+        height=140 + 18 * bar["y"].nunique(), width=820,
+        title="abx_year-moderated metabolite -> chemistry interactions "
+              "(adjusted, standardized slopes)",
+        xaxis_title="Standardized adjusted slope of chemistry ~ metabolite "
+                    "(per abx group)",
+        yaxis_title="Chemistry | metabolite",
+        yaxis=dict(categoryorder="array", categoryarray=y_order[::-1],
+                   showgrid=True, gridcolor="lightgrey", gridwidth=0.5),
+        xaxis=dict(showgrid=True, gridcolor="lightgrey", gridwidth=0.2,
+                   zeroline=True, zerolinecolor="darkgrey", zerolinewidth=2),
+        plot_bgcolor="white", margin=dict(l=220, r=40, t=80, b=50),
+        legend_title="abx_year",
+    )
+
+    fig.write_image(out_pdf, width=820, height=140 + 18 * bar["y"].nunique())
+    fig.show()
+    return fig, bar
