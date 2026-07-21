@@ -1,0 +1,151 @@
+---
+title: "microbe_logistic_regression_plot"
+author: "Crystal Perez"
+date: "2025-08-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# data wrangling
+library(tidyr)
+library(dplyr)
+library(forcats) 
+library(ComplexHeatmap)
+library(circlize)  # for color functions
+
+# data vis
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+```
+
+# Make a more compact plot: complex heatmap again!
+
+```{r read.combined.ORs.qs}
+microbe_ORs = read.csv("data/sig_logit_all_ors_rarefied.csv")
+q_values = read.csv("data/sig_logit_all_qs_rarefied.csv")
+
+rownames(microbe_ORs) = microbe_ORs$plot_name
+microbe_ORs$plot_name <- NULL
+microbe_ORs$feature <- NULL
+
+rownames(q_values) = q_values$plot_name
+q_values$plot_name <- NULL
+q_values$feature <- NULL
+```
+
+```{r sort.rename.cols}
+microbe_ORs_sorted <- microbe_ORs[order(microbe_ORs[, "abx_three"],
+                                            decreasing = TRUE), ]
+rename_vec <-  c(
+    abx_three = "0 - 3 mo.",
+    abx_twelve = "3 - 12 mo.",
+    meds_cholesterol   = "Cholesterol med. use",
+    meds_blood_sugar  = "Blood sugar med. use"
+  )
+
+colnames(microbe_ORs_sorted) <- recode(colnames(microbe_ORs_sorted),
+                                         !!!rename_vec)
+```
+
+```{r set.up.significance}
+# Significance annotation logic
+stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  if (p < 0.1)  return("#")
+  return("")
+}
+```
+
+```{r, define.color.columns}
+OR_cols <- c("0 - 3 mo.",
+             "3 - 12 mo.",
+             "Cholesterol med. use",
+             "Blood sugar med. use")
+
+### Create matrix
+OR_matrix <- as.matrix(microbe_ORs_sorted[, OR_cols])
+rownames(OR_matrix) <- rownames(microbe_ORs_sorted)
+
+q_matrix <- as.matrix(q_values)
+qval_mat <- q_matrix[rownames(microbe_ORs_sorted), ]
+```
+
+
+```{r colors.annotations}
+phyla_colors <- c(
+  "Actinobacteria"   = "#9400D3",
+  "Bacteroidetes"    = "#FF8C00",
+  "Cyanobacteria"    = "#00FFE2",
+  "Firmicutes"       = "#4682B4",
+  "Fusobacteria"     = "#DC143C",
+  "Lentisphaerae"    = "#C1AD09",
+  "Patescibacteria"  = "#FF69B4",
+  "Proteobacteria"   = "#33a02c",
+  "Tenericutes"      = "#FFFF00",
+  "Verrucomicrobia"  = "#A0522D",
+  "Epsilonbacteraeota" = "#AEDF12",
+  "Synergistetes" = "#D2B48C",
+  "Euryarchaeota" = "#FFE2FD"
+  )
+
+anno_phyla <- microbe_ORs_sorted$Phylum           # categorical
+anno_prevalence <- microbe_ORs_sorted$prevalence  # continuous
+
+cont_colors <- colorRamp2(c(min(anno_prevalence, na.rm = TRUE),
+                            median(anno_prevalence, na.rm = TRUE),
+                            max(anno_prevalence, na.rm = TRUE)),
+                          c("lightgrey", "dimgrey", "black"))
+
+or_col_fun   <- colorRamp2(c(0.5, 1, 3), c("#008080", "white", "#800000"))
+
+row_anno <- rowAnnotation(
+  Prevalence = anno_prevalence,
+  Phylum = anno_phyla,
+  col = list(
+    Prevalence = cont_colors,
+    Phylum = phyla_colors),
+  simple_anno_size = unit(3, "mm"),
+  show_annotation_name = FALSE,
+  gp = gpar(col = "white", lwd = 0.1)
+)
+```
+
+```{r, fig.height=30, fig.width=5}
+ht_ORs <- Heatmap(OR_matrix,
+                   name = "OR",
+                   heatmap_legend_param = list(
+                     title = "Odds Ratio",
+                     title_position = "topleft"),
+                   left_annotation = row_anno,
+                   col = or_col_fun,
+                   na_col = "lightgrey",
+                   column_names_rot = 45,
+                   column_names_gp = gpar(fontsize = 10),
+                   column_gap = unit(2, "mm"),
+                   cluster_rows = FALSE,
+                   cluster_columns = FALSE,
+                   show_row_names = TRUE, 
+                   row_names_side = "left", 
+                   row_names_gp = gpar(fontsize = 9),
+                   rect_gp = gpar(col = "white", lwd = 0.2),
+                   height = unit(nrow(microbe_ORs_sorted) * 3.5, "mm"),
+                   cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- qval_mat[i, j]
+                     star <- stars(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 10, col = "black"))}
+                   )
+ht_ORs 
+```
+
+```{r save.fig.not.imp}
+pdf("figures/microbe_heatmap_logit_vendor_rarefied.pdf",
+    width = 5, height = 19)
+draw(ht_ORs)
+dev.off()
+```
+

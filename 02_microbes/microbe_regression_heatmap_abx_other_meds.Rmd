@@ -1,0 +1,182 @@
+---
+title: "microbe_regression_heatmap_abx_other_meds"
+author: "Crystal Perez"
+date: "2025-07-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ComplexHeatmap)
+library(circlize)  # for color functions
+library(dplyr)
+```
+
+
+```{r read.data}
+microbe_betas = read.csv("data/microbe_betas_sugar_chol_abx_10percent.csv")
+q_values = read.csv("data/microbe_qs_sugar_chol_abx_10percent.csv")
+
+rownames(microbe_betas) = microbe_betas$plot_name
+microbe_betas$plot_name <- NULL
+microbe_betas$feature <- NULL
+
+rownames(q_values) = q_values$plot_name
+q_values$plot_name <- NULL
+q_values$feature <- NULL
+```
+
+
+```{r sort.rename.cols}
+microbe_betas_sorted <- microbe_betas[order(microbe_betas[, "abx_three"],
+                                            decreasing = TRUE), ]
+rename_vec <-  c(
+    abx_three = "0 - 3 mo.",
+    abx_twelve = "3 - 12 mo.",
+    meds_cholesterol   = "Cholesterol med. use",
+    meds_blood_sugar  = "Blood sugar med. use"
+  )
+
+# Renaming for the plot
+colnames(microbe_betas_sorted) <- recode(colnames(microbe_betas_sorted),
+                                         !!!rename_vec)
+```
+
+
+```{r set.up.significance}
+# Significance annotation logic
+stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  if (p < 0.1)  return("#")
+  return("")
+}
+```
+
+## Set up for heatmap
+
+```{r, define.color.columns}
+beta_cols <- c("0 - 3 mo.",
+               "3 - 12 mo.", 
+               "Cholesterol med. use",
+               "Blood sugar med. use")
+
+### Create matrix
+beta_matrix <- as.matrix(microbe_betas_sorted[, beta_cols])
+rownames(beta_matrix) <- rownames(microbe_betas_sorted)
+
+q_matrix <- as.matrix(q_values)
+qval_mat <- q_matrix[rownames(microbe_betas_sorted), ]
+
+phyla_colors <- c(
+  "Actinobacteria"   = "#9400D3",
+  "Bacteroidetes"    = "#FF8C00",
+  "Cyanobacteria"    = "#00FFE2",
+  "Firmicutes"       = "#4682B4",
+  "Fusobacteria"     = "#DC143C",
+  "Lentisphaerae"    = "#C1AD09",
+  "Patescibacteria"  = "#FF69B4",
+  "Proteobacteria"   = "#33a02c",
+  "Tenericutes"      = "#FFFF00",
+  "Verrucomicrobia"  = "#A0522D",
+  "Epsilonbacteraeota" = "#AEDF12",
+  "Synergistetes" = "#D2B48C",
+  "Euryarchaeota" = "#FFE2FD"
+  )
+
+anno_phyla <- microbe_betas_sorted$Phylum           # categorical
+anno_prevalence <- microbe_betas_sorted$prevalence  # continuous
+
+cont_colors <- colorRamp2(c(min(anno_prevalence, na.rm = TRUE),
+                            median(anno_prevalence, na.rm = TRUE),
+                            max(anno_prevalence, na.rm = TRUE)),
+                          c("lightgrey", "dimgrey", "black"))
+
+beta_col_fun <- colorRamp2(c(-2, 0, 2), c("blue", "white", "red")) #"#FFF0F5"
+```
+
+```{r heatmap.plot, fig.height=13.75, fig.width=5}
+# make row annotation
+row_anno <- rowAnnotation(
+  Prevalence = anno_prevalence,
+  Phylum = anno_phyla,
+  col = list(
+    Prevalence = cont_colors,
+    Phylum = phyla_colors),
+  simple_anno_size = unit(3, "mm"),
+  show_annotation_name = TRUE,
+  annotation_name_rot = 45,
+  annotation_name_gp = gpar(fontsize = 9, fontface="bold"), 
+  gp = gpar(col = "white", lwd = 0.1)
+)
+
+ht_beta <- Heatmap(beta_matrix,
+                   name = "Beta coefficient",
+                   heatmap_legend_param = list(
+                     title = "Beta coefficient",
+                     title_position = "topleft"),
+                   left_annotation = row_anno,
+                   col = beta_col_fun,
+                   na_col = "lightgrey",
+                   column_names_rot = 45,
+                   column_names_gp = gpar(fontsize = 10),
+                   column_gap = unit(2, "mm"),
+                   cluster_rows = FALSE,
+                   cluster_columns = FALSE,
+                   show_row_names = TRUE, 
+                   row_names_side = "left", 
+                   row_names_gp = gpar(fontsize = 9),
+                   rect_gp = gpar(col = "darkgrey", lwd = 0.1),
+                   height = unit(nrow(microbe_betas_sorted) * 3.5, "mm"),
+                   cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- qval_mat[i, j]
+                     star <- stars(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 10, col = "black"))}
+                   )
+
+ht_beta 
+```
+
+```{r save.fig.not.imp}
+pdf("figures/microbe_heatmap_sorted_three_mo_10percent_vendor_test.pdf",
+    width = 5, height = 13.75)
+draw(ht_beta)
+dev.off()
+```
+
+```{r,  fig.height=6, fig.width=24}
+# beta_col_fun <- colorRamp2(c(-2, 0, 2), c("blue", "white", "red")) #"#FFF0F5"
+# 
+# transpose_betas <- t(beta_matrix)
+# tranpose_q_vals <- t(qval_mat)
+# 
+# transposed_heatmap <- Heatmap(transpose_betas,
+#         name = "Beta coefficient",
+#         heatmap_legend_param = list(
+#           title = "Beta coefficient",
+#           title_position = "leftcenter-rot"),
+#         col = beta_col_fun,
+#         cluster_rows = FALSE,
+#         cluster_columns = TRUE,
+#         row_names_side = "left", 
+#         row_names_gp = gpar(fontsize = 10),
+#         height = unit(nrow(microbe_betas_sorted) * 0.75, "mm"),
+#         width = unit(nrow(microbe_betas_sorted) * 6, "mm"),
+#         rect_gp = gpar(col = "darkgrey", lwd = 0.2),
+#         cell_fun = function(j, i, x, y, width, height, fill) {
+#           pval <- tranpose_q_vals[i, j]
+#           star <- stars(pval)
+#           grid.text(star, x, y, gp = gpar(fontsize = 12, col = "black"))}
+#         )
+# 
+```
+
+
+```{r}
+# pdf("figures/microbe_heatmap_transposed.pdf", width = 24, height = 6) 
+# draw(transposed_heatmap)
+# dev.off()
+```
+

@@ -8,7 +8,7 @@ from patsy import dmatrices
 import plotly.io as pio
 import plotly.express as px
 import plotly.graph_objects as go
-pio.get_chrome()
+#pio.get_chrome()
 
 def get_results(feature, df, formula_template, term_of_interest):
     """
@@ -195,7 +195,7 @@ def run_year_interaction_regressions(col_to_iterate, data, outcome_var, categori
     """
     This function is a verison of the regression code where we can (1) change
     the outcome variable to be which ever diversity metric desired, and (2)  
-    iterate through diet variables (or anything else we think interact with
+    iterate through diet variables (or anything else like matbs we think interact with
     antibiotic use). The interaction terms specifically are pulled out and returned
     as a dataframe. Similar to diet, only this is adapted to combine the antibiotic 
     groups for larger "N" when looking at sparse bugs and metabolites. For ONE outcome variable
@@ -222,8 +222,8 @@ def run_year_interaction_regressions(col_to_iterate, data, outcome_var, categori
                 })
     else:   
         for microbe in col_to_iterate:
-            formula = (f"{outcome_var} ~ C(sex) + age + BMI_CALC + C(abx_year)*C({microbe}) +" 
-                       f"C(meds_cholesterol) + C(meds_blood_sugar) + PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR + C(vendor_dashboard)")
+            formula = (f"{outcome_var} ~ C(sex) + age + BMI_CALC + C(abx_year)*C({microbe} + C(vendor_dashboard) +" 
+                       f"C(meds_cholesterol) + C(meds_blood_sugar) + PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR")
             fitted = ols(formula, data=data).fit()
     
             interaction_terms = [term for term in fitted.pvalues.index if "C(abx_year)" in term and f"{microbe}" in term]
@@ -355,3 +355,89 @@ def make_barbell_plot(metabolite, data_raw, data_tests):
     
     fig.write_image(f"figures/microbe_metab_{metabolite}_interactions_mean_difference.pdf", width=700, height=110 + (20 * len(barbell_data_absent))) 
     fig.show() 
+
+import numpy as np
+import pandas as pd
+from patsy import dmatrix
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+
+def fast_interaction_screen(metabolites, data, outcome_var,
+                            include_vendor=True, min_n=30, robust=False):
+    """
+    Screen abx_year x metabolite interactions for ONE clinical-chemistry outcome.
+
+    Numeric (lstsq) reimplementation of the OLS interaction screen. Reproduces
+    statsmodels' coefficient / SE / t to numerical precision, but:
+      - builds the fixed covariate design once, only swaps the 2 metabolite cols
+      - identifies the interaction by POSITION (last column), so it is immune to
+        the substring-name-collision bug (col_35 vs col_351)
+      - drops single-vendor collinearity via include_vendor=False + a rank guard
+
+    Complete-case per metabolite (matches ols default NaN handling); n travels
+    with each row. Per-chemistry BH-FDR is applied here (q_value). The GLOBAL
+    (cross-chemistry) FDR is applied by the caller after all chemistries finish.
+
+    Parameters
+    ----------
+    metabolites : list[str]   metabolite column names to iterate (predictors)
+    data : pd.DataFrame        merged labs+metabolites frame
+    outcome_var : str          the clinical-chemistry column (outcome)
+    include_vendor : bool      True for shared labs (both vendors measured it),
+                               False for single-vendor labs (vendor is constant
+                               -> C(vendor) would be perfectly collinear)
+    min_n : int                skip a metabolite with fewer complete-case rows
+    robust : bool              True -> HC3 heteroskedasticity-robust SEs
+
+    Returns
+    -------
+    pd.DataFrame with columns: metabolite, beta, t_stat, p_value, n, q_value
+    """
+    vend = " + C(vendor)" if include_vendor else ""
+    base_rhs = ("C(sex) + age + BMI_CALC + C(abx_year) + C(meds_cholesterol) + "
+                "C(meds_blood_sugar) + PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR" + vend)
+
+    base_cols = ["abx_year", "sex", "BMI_CALC", "age", "meds_cholesterol",
+                 "meds_blood_sugar", "PC1", "PC2", "PC3", "PC4", "PC5", "centered_eGFR"]
+    if include_vendor:
+        base_cols.append("vendor")
+
+    rows = []
+    for met in metabolites:
+        sub = data[[outcome_var, met] + base_cols].dropna()
+        if sub.shape[0] < min_n:
+            continue
+
+        Xb = np.asarray(dmatrix(base_rhs, sub, return_type="dataframe"), dtype=float)
+        abx = (sub["abx_year"].values == "past_year").astype(float)
+        m = sub[met].values.astype(float)
+        X = np.column_stack([Xb, m, abx * m])      # ..., metabolite, INTERACTION (last)
+        y = sub[outcome_var].values.astype(float)
+
+        beta, _, rank, _ = np.linalg.lstsq(X, y, rcond=None)
+        n, p = X.shape
+        if rank < p:                                # collinear (e.g. constant vendor)
+            continue
+        resid = y - X @ beta
+        dof = n - p
+        XtX_inv = np.linalg.inv(X.T @ X)
+        j = p - 1                                   # interaction column
+
+        if robust:                                  # HC3 robust SE
+            h = np.einsum("ij,jk,ik->i", X, XtX_inv, X)   # leverages
+            u = resid / (1.0 - h)
+            meat = (X * (u ** 2)[:, None]).T @ X
+            cov = XtX_inv @ meat @ XtX_inv
+            se_j = np.sqrt(cov[j, j])
+        else:
+            sigma2 = resid @ resid / dof
+            se_j = np.sqrt(sigma2 * XtX_inv[j, j])
+
+        t = beta[j] / se_j
+        rows.append({"metabolite": met, "beta": beta[j], "t_stat": t,
+                     "p_value": 2 * stats.t.sf(abs(t), dof), "n": n})
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["q_value"] = multipletests(out["p_value"], method="fdr_bh")[1]  # within-chemistry
+    return out
