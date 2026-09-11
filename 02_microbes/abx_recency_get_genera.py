@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 # Read and sort abx use data
-abx_covar = pd.read_csv("data/abx_covariates_with_statins_a1c_all_covars.csv")
+abx_covar = pd.read_csv("../data/abx_covariates_with_statins_a1c_all_covars.csv")
 abx_covar = abx_covar.sort_values(by="days_in_program")
 
 # Read and sort ASVS
@@ -71,7 +71,7 @@ save_taxonomy = genus_more_specific[[
     'Kingdom','Phylum','Class','Order','Family','Genus','taxa_genus_level'
 ]].drop_duplicates()
 
-save_taxonomy.to_csv("data/tax_genus_level.csv", index=False)
+save_taxonomy.to_csv("../data/tax_genus_level.csv", index=False)
 
 arrays = [genus_more_specific['public_client_id'], genus_more_specific['taxa_genus_level']]
 index = pd.MultiIndex.from_arrays(arrays, names=('public_client_id','taxa_genus_level'))
@@ -96,4 +96,4 @@ taxa_pivot_genus.reset_index(inplace=True)
 taxa_pivot_genus.columns.name = None
 
 ###### Save raw count table #####
-taxa_pivot_genus.to_csv("data/rh_abx_genus_level_counts.csv", index=False)
+taxa_pivot_genus.to_csv("../data/rh_abx_genus_level_counts.csv", index=False)

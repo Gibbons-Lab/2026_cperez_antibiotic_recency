@@ -1,0 +1,773 @@
+---
+title: "metBMI_analysis"
+author: "Crystal Perez"
+date: "2026-04-21"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Analyze differences in metBMI and measured BMI between the antibiotic use groups
+In our metabolite regression, we see that antibiotic use may have a mixed effect 
+on the blood metabolome. 
+- Namely, there are some metabolites that are negatively
+associated with metS (for example, cinnamoylglycine), and antibiotic users tend
+to have less of this metabolite in their blood compared to non-users. 
+- On the other hand, metabolites such as 4-methyl-2-oxopentanoate are **positively** associated
+with metS while being **negatively** associated with recent antibiotic use. 
+
+## Read in data
+
+```{r libraries}
+library(ggplot2)     
+library(tidyverse)
+library(emmeans)
+library(data.table)
+library(cowplot)
+library(ggbeeswarm)
+library(dplyr)
+library(ggeffects)
+library(car)
+```
+
+Read data from Lance. Looks like the leading zero was dropped so we'll have to 
+add that back in.
+
+```{r read.data}
+# metBMI data from Lance
+metBMIs = read.csv("../data/metBMI_for_ids_crystal_test.csv", 
+                   colClasses = c(public_client_id = "character"))
+
+# Add leading 0s
+#metBMIs$public_client_id <- paste0("0", metBMIs$public_client_id)
+# sum(is.na(metBMIs$bBMI))
+
+# Read in metadata and alpha diversities
+metadata = read.csv("../data/metabolites_merged_used_for_regressions.csv",
+                    colClasses = c(public_client_id = "character"))[, 1:27]
+
+# Factor categorical vars
+metadata$sex <- factor(metadata$sex)
+metadata$meds_blood_sugar <- factor(metadata$meds_blood_sugar)
+metadata$meds_cholesterol <- factor(metadata$meds_cholesterol)
+
+# Specify levels so plots have correct order
+metadata$abx_recency <- factor(metadata$abx_recency,
+                                 levels = c("none","twelve","three"))
+
+# For interpretation
+metadata$centered_age <- metadata$age - mean(metadata$age)
+```
+
+## Initial Visualization
+
+Merge tables and visualize!
+
+```{r merge}
+metBMIs_small <- metBMIs[ , c('public_client_id','bBMI')]
+
+# Turn df into data.table for melting later
+metBMI_meta <- data.table(
+  inner_join(metadata,
+             metBMIs_small,
+             by = "public_client_id")
+  )
+
+table(metBMI_meta$abx_recency)
+```
+
+For initial visualization, let's replicate the plot that Lance made but comparing
+the results with/without the outliers.
+
+```{r remove.outliers}
+# Watanabe et al. removed +/- 3x mean from their models
+# Will do the same as outliers will have poor prediction
+metBMI_meta_clean <- metBMI_meta %>%
+  filter(
+    abs(BMI_CALC - mean(BMI_CALC)) <= (3 * sd(BMI_CALC)))
+
+table(metBMI_meta_clean$abx_recency)
+```
+
+Finally, plot the agreement between measured and predicted BMI.
+
+```{r save.cleaned, fig.width=5, fig.height=5}
+# Axis limits
+lims <- range(c(metBMI_meta_clean$bBMI, metBMI_meta_clean$BMI_CALC))
+
+metBMI_meta_clean <- metBMI_meta_clean %>%
+  mutate(
+    resid_measured_BMI = resid(lm(BMI_CALC ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + abx_recency, data = .)),
+    resid_predict_BMI = resid(lm(bBMI ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + abx_recency, data = .))
+  )
+
+cor_test <- cor.test(metBMI_meta_clean$resid_predict_BMI, 
+                     metBMI_meta_clean$resid_measured_BMI,
+                     method = "pearson")
+
+cor_test
+
+r <- cor_test$estimate
+p <- cor_test$p.value
+
+corr_test_label <- paste0(
+  sprintf("Pearson's r = %.4f", r),
+  "\nP= ", format.pval(p, digits = 4)
+)
+
+corr_metBMI_plot <- ggplot(metBMI_meta_clean, aes(x=bBMI, y=BMI_CALC)) +
+  geom_abline(                               # y = x
+    slope = 1, intercept = 0, 
+    linetype = "dashed", linewidth = 1) + 
+  geom_point(alpha=0.2, size = 3) +
+  geom_smooth(method="lm", se = TRUE) + 
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = corr_test_label,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 6
+  ) + 
+  coord_equal(xlim = lims, ylim = lims) +
+  labs(x = "Predicted BMI (metBMI, kg/m²)", y = "Measured BMI (kg/m²)") +
+  theme_minimal() + 
+  theme(
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.3),
+    panel.grid.minor = element_line(color = "gray80", linewidth = 0.1),
+    axis.title = element_text(size = 18), 
+    axis.text = element_text(size = 18)
+  )
+
+corr_metBMI_plot
+```
+
+```{r save.corr.plot}
+# Save plot
+pdf("../figures/abx_recency_metBMI_pearson_r.pdf", width = 5, height = 5)  # open a PDF device
+plot(corr_metBMI_plot)
+dev.off()
+```
+
+# Add metabolite associations
+ 
+Check to see if the error is associated with more or less of certain metabolites.
+Pick abx responsive metabolites that are robustly maintained in the metBMI model 
+(suppl table metBMI).
+ 
+## First let's read in the metabolomics data
+
+```{r read.in.metab.data}
+# We will calculate the difference and center that error
+metBMI_meta_clean$delta_measure = metBMI_meta_clean$bBMI - metBMI_meta_clean$BMI_CALC
+metBMI_meta_clean$centered_error = (metBMI_meta_clean$delta_measure - mean(metBMI_meta_clean$delta_measure))
+
+# Read in data
+metabs = read.csv('../data/metabolites_merged_used_for_regressions.csv', 
+                   colClasses = c(public_client_id = "character"))
+
+metabs_subset <- metabs[, c('public_client_id', 'metabolite_100001083', 'metabolite_240')]
+
+metbmi_metabolites <- inner_join(
+  metBMI_meta_clean,
+  metabs_subset,
+  by = "public_client_id")
+```
+
+## Plot indolepropionate
+
+```{r indoleprop.lm}
+indoleprop_lm <- lm(metabolite_100001083 ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + centered_error + 
+                    abx_recency,
+   data = metbmi_metabolites)
+
+indoleprop_beta <- coef(summary(indoleprop_lm))["centered_error", "Estimate"]
+indoleprop_pval <- coef(summary(indoleprop_lm))["centered_error", "Pr(>|t|)"]
+
+indoleprop_label_text <- paste0(
+  "β = ", round(indoleprop_beta, 3),
+  "\nP = ", signif(indoleprop_pval, 3)
+)
+```
+
+```{r resid.error.indolepropionate, fig.height=5, fig.width=5}
+indolprop_df <- metbmi_metabolites %>%  filter(!is.na(metabolite_100001083))
+
+indolprop_df <- indolprop_df %>%
+  mutate(
+    resid_indoleprop = resid(lm(metabolite_100001083 ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + 
+                    abx_recency, data = .)),
+    resid_error   = resid(lm(centered_error ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + 
+                    abx_recency, data = .))
+  )
+
+indole_plot <- ggplot(indolprop_df, aes(x=resid_error, y=resid_indoleprop)) +
+  geom_point(alpha=0.3, size = 3) +
+  geom_smooth(method="lm") + 
+  annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = indoleprop_label_text,
+    hjust = 0,
+    vjust = 1,
+    size = 7
+  ) + 
+  labs(x = "BMI Prediction Error\n(Residualized)", y = "Indolepropionate\n(Residualized)") + 
+  theme_minimal() + 
+  theme(
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.3),
+    panel.grid.minor = element_line(color = "gray80", linewidth = 0.2),
+    axis.title = element_text(size = 20), 
+    axis.text = element_text(size = 20)
+  )
+
+indole_plot
+```
+
+save!
+
+```{r save.indole.plot}
+# Save figure
+pdf("../figures/indolepropionate_metBMI_error_association.pdf", width = 5, height = 5)
+plot(indole_plot)
+dev.off()
+```
+
+## Plot 3-(4-hydroxyphenyl)lactate
+
+```{r model.hpla}
+hpla_lm <- lm(metabolite_240 ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + centered_error + 
+                    abx_recency,
+   data = metbmi_metabolites)
+
+hpla_beta <- coef(summary(hpla_lm))["centered_error", "Estimate"]
+hpla_pval <- coef(summary(hpla_lm))["centered_error", "Pr(>|t|)"]
+
+hpla_label_text <- paste0(
+  "β = ", round(hpla_beta, 3),
+  "\nP = ", signif(hpla_pval, 3)
+)
+```
+
+
+```{r resid.hpla, fig.height=5, fig.width=5}
+hpla_df <- metbmi_metabolites %>%  filter(!is.na(metabolite_240)) 
+
+hpla_df <- hpla_df %>%
+  mutate(
+    resid_hpla = resid(lm(metabolite_240 ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + 
+                    abx_recency, data = .)),
+    resid_error   = resid(lm(centered_error ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + 
+                    abx_recency, data = .))
+  )
+
+hpla_plot <- ggplot(hpla_df, aes(x=resid_error, y=resid_hpla)) +
+  geom_point(alpha=0.3, size = 3) +
+  geom_smooth(method="lm") + 
+  annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = hpla_label_text,
+    hjust = 0,
+    vjust = 1,
+    size = 7
+  ) + 
+  labs(x = "BMI Prediction Error\n(Residualized)", y = "3-(4-hydroxyphenyl)lactate\n(Residualized)") +
+  theme_minimal() + 
+  theme(
+    panel.grid.major = element_line(color = "gray80", linewidth = 0.3),
+    panel.grid.minor = element_line(color = "gray80", linewidth = 0.2),
+    axis.title = element_text(size = 20), 
+    axis.text = element_text(size = 20)
+  )
+
+hpla_plot
+```
+
+```{r save.alpha.plot}
+pdf("../figures/hpla_metBMI_error_association.pdf", width = 5, height = 5)
+plot(hpla_plot)
+dev.off()
+```
+
+# Onto statistical testing
+
+## Testing differences in measured and predicted BMI by abx group
+
+### BMI_CALC
+We know that the measured BMI between our antibiotic use recency groups differ,
+let's re-examine this below.
+
+```{r individual.models.BMI_CALC}
+bmi_calc_model <- lm(BMI_CALC ~ sex + centered_age + 
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + abx_recency, data=metBMI_meta_clean)
+summary(bmi_calc_model)
+```
+
+Yep, the BMI of individuals in the abx_recency groups are ~1 kg/m^2 larger than
+that of the "none" group.
+
+### metBMI
+
+```{r}
+bbmi_model <- lm(bBMI ~  sex + centered_age +
+                    meds_blood_sugar + meds_cholesterol + centered_eGFR +
+                    PC1 + PC2 + PC3 + PC4 + PC5 + abx_recency, data=metBMI_meta_clean)
+summary(bbmi_model)
+```
+Similarly, the metBMI of the antibiotic use recency groups is also larger. 
+
+# Okie dokie, let's move onto clinical chems
+
+```{r merge.labs}
+labs_clean = read.csv("../data/clincal_chems_abx_users_clean.csv", 
+                   colClasses = c(public_client_id = "character"))
+
+# Grab only the lab cols
+labs_list <- colnames(labs_clean %>% dplyr::select(-(1:31)))
+labs_clean$vendor <- factor(labs_clean$vendor)
+
+labs_clean$season <- factor(labs_clean$season)
+labs_small_df <- labs_clean[, c("public_client_id", "vendor", labs_list)] 
+
+# Merge
+metBMI_labs <- data.table(inner_join(metBMI_meta_clean,
+             labs_small_df,
+             by = "public_client_id"))
+```
+
+## Run linear regressions with labs that are supplied by BOTH vendors 
+
+```{r list.outcomes}
+chem_outcomes = c('REDCELLCOUNT','ARACHIDONICACID','GLUTATHIONE_TOTAL',
+                  'LDL_SIZE','OMEGA_6_OMEGA_3RATIO','METHYLMALONICACID','GLOBULIN',
+                  'CREATININEENZ_SER','FOLICACID_SERUM','VITAMIND_25_OHTOT',
+                  'MONOCYTESABSOLUTE','HOMOCYSTEINE_SERUM','INSULIN','WHITECELLCOUNT',
+                  'TRIGLYCERIDES','PLATELETCOUNTTHOUSAND','CALCIUM', 'HOMA_IR',
+                  'CHLORIDE','BILIRUBIN_TOTAL','ALKALINEPHOSPHATASE','ZINC',
+                  'EPA_AA','MONOCYTES','HEMATOCRIT','ALBUMIN','EOSINOPHILS',
+                  'TNF_ALPHA','GGT','SODIUM','QUICKI','TriglycerideHDLRatio',
+                  'DHA','BASOPHILS','UREANITROGEN','LYMPHOCYTESABSOLUTE','LYMPHOCYTES',
+                  'POTASSIUM','LEAD_BLOOD','TOTALNEUTROPHILS','LDL_CHOLCALCULATION',
+                  'LDLPARTICLENUMBER','RDW','CARBONDIOXIDE_CO2_','ADIPONECTIN_SERUM',
+                  'IL_6','GLYCOHEMOGLOBINA1C','BASOPHILSABSOLUTE','TOTALNEUTROPHILSAB',
+                  'CHOLESTEROL_TOTAL','MERCURY_BLOOD','MCHC','ASAT_SGOT_', 'IL_8',
+                  'EPA','MCV','ALAT_SGPT_','MCH','OMEGA_3INDEX','URICACID',
+                  'PROTEIN_TOTALSERUM','CRPHIGHSENSITIVITY','LDLSMALL','FERRITIN',
+                  'HEMOGLOBIN','HDLCHOLDIRECT','A_GRATIO','GLUCOSE',
+                  'EOSINOPHILSABSOLUTE','BUN_CREATRATIO')
+```
+
+Vectorize running models:
+
+```{r vec.models.both.vendors}
+# Check levels abx
+levels(metBMI_labs$abx_recency)
+
+# Run models
+lab_models_all <- setNames(lapply(chem_outcomes, function(outcome) {
+    # Drop NAs for this specific outcome
+    subdat <- metBMI_labs[!is.na(metBMI_labs[[outcome]]), ]
+    
+    # Build formula dynamically
+    form <- as.formula(
+      paste(outcome, "~ sex + centered_age + centered_eGFR +
+                    meds_cholesterol + meds_blood_sugar + 
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + vendor +
+                    centered_error * abx_recency + 
+                    centered_BMI:abx_recency + centered_BMI:centered_error"))
+    
+    mod <- lm(form, data = subdat)   # Run model
+    attr(mod, "outcome") <- outcome  # Attach outcome name to the model
+    mod                              # Return the model object
+  }), 
+  
+  chem_outcomes) 
+```
+
+Move onto those supplied by only one vendor:
+
+```{r model.outcomes.one.vendor}
+one_only_outcome = c('ANTIOXIDCAP_TOTAL','ARSENIC_BLOOD','BILIRUBIN_DIRECT',
+               'BILIRUBIN_INDIRECT','COPPER_RBC','HDLLARGE','LACTICDEHYDROGENASE',
+               'LDLMEDIUM','MANGANESE_SERUM','MPV','PAI_1ANTIGEN_QNT',
+               'PHOSPHORUSINORGANIC','SELENIUM_SERUM','SUPEROXDISMUTSOD',
+               'VITAMIND3_25_OH','ZINC_RBC', 'DPA','HDLPARTICLENUMBER','LINOLEIC_ACID',
+               'LPIR_SCORE','MAGNESIUM_SERUM','OMEGA_3_TOTAL','OMEGA_6_TOTAL',
+               'OXLDL')
+
+# Run models
+lab_models_one_vendor <- setNames(lapply(one_only_outcome, function(outcome) {
+    # Drop NAs for this specific outcome
+    subdat <- metBMI_labs[!is.na(metBMI_labs[[outcome]]), ]
+    
+    # Build formula dynamically (NOTE THIS DOES NOT HAVE VENDOR)
+    form <- as.formula(
+      paste(outcome, "~ sex + centered_age + centered_eGFR +
+                    meds_cholesterol + meds_blood_sugar + 
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + 
+                    centered_error * abx_recency + 
+                    centered_BMI:abx_recency + centered_BMI:centered_error"))
+    mod <- lm(form, data = subdat)   # Run model
+    attr(mod, "outcome") <- outcome  # Attach outcome name to the model
+    mod                              # Return the model object
+  }), 
+  
+  one_only_outcome) 
+```
+
+## Concatenate and run type II ANOVA:
+Here looking for the term-wide significance of the `abx_recency:error` interaction 
+term.
+
+```{r}
+extract_omni <- function(mod_list) {
+  do.call(rbind, lapply(names(mod_list), function(nm) {
+    av  <- Anova(mod_list[[nm]], type = "II")
+    row <- "centered_error:abx_recency"
+    data.frame(
+      outcome = nm,
+      n_subjects = nobs(mod_list[[nm]]),
+      F_val  = if (row %in% rownames(av)) av[row, "F value"] else NA_real_,
+      df_num = if (row %in% rownames(av)) av[row, "Df"]      else NA_integer_,
+      p_omni = if (row %in% rownames(av)) av[row, "Pr(>F)"]  else NA_real_,
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+omni_all <- rbind(extract_omni(lab_models_all), extract_omni(lab_models_one_vendor))
+omni_all$q_omni <- p.adjust(omni_all$p_omni, method = "fdr")
+```
+
+Let's print the chems with an interaction meeting our threshold:
+```{r show.significant.chems}
+omni_all %>% filter(omni_all$q_omni <0.1)
+```
+
+## Awesome, after running models, let's extract covariates
+
+```{r lm.results.both.vendors}
+terms_of_interest <- c("centered_error:abx_recencythree",
+                       "centered_error:abx_recencytwelve")
+
+# Here global model refers to covars used through the rest of the paper
+# Later I will have to do sens analysis for the vitd supplmentation and season
+abx_term_results_global_model <- do.call(rbind, lapply(names(lab_models_all), function(outcome_name) {
+  
+  mod <- lab_models_all[[outcome_name]]
+  coef_table <- summary(mod)$coefficients
+  
+  available_terms <- intersect(terms_of_interest, rownames(coef_table))
+  
+  if (length(available_terms) == 0) return(NULL)
+  
+  data.frame(
+    outcome = outcome_name,
+    term = available_terms,
+    estimate = round(coef_table[available_terms, "Estimate"], 4),
+    std_error = round(coef_table[available_terms, "Std. Error"], 4),
+    statistic = coef_table[available_terms, "t value"],
+    p_value = coef_table[available_terms, "Pr(>|t|)"],
+    stringsAsFactors = FALSE
+  )
+}))
+```
+
+Next move onto those supplied by one one vendor.
+
+```{r lm.results.one.vendor}
+abx_term_results_global_one_vendor <- do.call(rbind, lapply(names(lab_models_one_vendor), function(outcome_name) {
+  
+  mod <- lab_models_one_vendor[[outcome_name]]
+  coef_table <- summary(mod)$coefficients
+  
+  available_terms <- intersect(terms_of_interest, rownames(coef_table))
+  
+  if (length(available_terms) == 0) return(NULL)
+  
+  data.frame(
+    outcome = outcome_name,
+    term = available_terms,
+    estimate = round(coef_table[available_terms, "Estimate"], 4),
+    std_error = round(coef_table[available_terms, "Std. Error"], 4),
+    statistic = coef_table[available_terms, "t value"],
+    p_value = coef_table[available_terms, "Pr(>|t|)"],
+    stringsAsFactors = FALSE
+  )
+}))
+```
+
+After extracting the terms, let's bind the rows and perform FDR correction. 
+
+```{r bind.results.FDR}
+# Add the number of participants observed per reg model
+n_map <- sapply(lab_models_all, nobs)
+abx_term_results_global_model$n_subjects <-
+  unname(n_map[abx_term_results_global_model$outcome])
+
+# Redefine for one vendor
+n_map <- sapply(lab_models_one_vendor, nobs)
+abx_term_results_global_one_vendor$n_subjects <-
+  unname(n_map[abx_term_results_global_one_vendor$outcome])
+
+# Bind data
+lab_reg_results_all <- rbind(abx_term_results_global_model, abx_term_results_global_one_vendor)
+
+# FDR correction
+lab_reg_results_all$fdr_p_value <- round(
+  ave(
+  lab_reg_results_all$p_value,
+  lab_reg_results_all$term,
+  FUN = function(p) p.adjust(p, method = "fdr")), 4)
+```
+
+Now let's print the rows for those significant in the F-test:
+```{r sig.chems.interaction.betas}
+get_coefs_list <- omni_all %>% 
+  filter(q_omni <0.1) %>% 
+  pull(outcome) %>% as.list()
+
+lab_reg_results_all %>% filter(outcome %in% get_coefs_list)
+```
+
+## Look at results in greater detail
+
+### Plotting functions
+```{r plotting.functions}
+abx_colors = c("none" = "#007ea7", "twelve" = "#80ced7", "three" = "darkgrey")
+
+fit_chem <- function(df, chemistry, id_col = "public_client_id") {
+
+  stopifnot(chemistry %in% names(df))
+
+  subdat <- df[!is.na(df[[chemistry]]), , drop = FALSE]
+  if (id_col %in% names(subdat)) rownames(subdat) <- subdat[[id_col]]
+
+  # vendor is only estimable when >1 level survives the NA filter
+  n_vendor <- length(unique(stats::na.omit(subdat$vendor)))
+  rhs <- c("sex", "centered_age", "centered_eGFR",
+           "meds_cholesterol", "meds_blood_sugar",
+           paste0("PC", 1:5), "centered_BMI",
+           if (n_vendor > 1) "vendor",
+           "centered_error * abx_recency",
+           "centered_BMI:abx_recency", "centered_BMI:centered_error")
+
+  form <- as.formula(paste(chemistry, "~", paste(rhs, collapse = " + ")))
+  mod  <- lm(form, data = subdat)
+  mf  <- model.frame(mod) 
+  dat <- as.data.frame(subdat)
+  stopifnot(nrow(dat) == nrow(mf))   # Make sure data, mod are aligned
+  
+  list(mod = mod, dat = dat, outcome = chemistry, vendor_adjusted = n_vendor > 1)
+}
+
+plot_chem <- function(df, chemistry, y_lab = chemistry, focal = c("centered_error", "abx_recency"),
+                      colors = abx_colors, clip = c(.025, .975)) {
+
+  fit <- fit_chem(df, chemistry)
+  mod <- fit$mod; dat <- fit$dat
+  
+  ref_value <- function(x) {
+    if (is.numeric(x)) mean(x, na.rm = TRUE)
+    else if (is.factor(x)) factor(names(sort(table(x), decreasing = TRUE))[1],
+                                  levels = levels(x))
+    else names(sort(table(x), decreasing = TRUE))[1]
+  }
+
+  nuisance <- setdiff(all.vars(formula(mod))[-1], focal)
+  refs <- lapply(dat[intersect(nuisance, names(dat))], ref_value)
+  refs$centered_BMI <- 0                      # explicit mean-BMI slice
+
+  newdat_ref <- dat
+  for (v in names(refs)) newdat_ref[[v]] <- refs[[v]]
+
+  dat$partial_y <- as.numeric(predict(mod, newdata = newdat_ref)) + residuals(mod)
+
+  # pass the SAME reference values to ggpredict so points and lines share an intercept
+  cond <- refs[vapply(refs, function(z) is.numeric(z) || is.factor(z), logical(1))]
+  cond <- cond[setdiff(names(cond), focal)]
+
+  pred <- ggeffects::ggpredict(
+            mod, terms = c("centered_error [all]", "abx_recency"),
+            condition = unlist(lapply(cond, function(z)
+                          if (is.factor(z)) as.character(z) else z))) |>
+    as.data.frame() |> dplyr::rename(centered_error = x, abx_recency = group)
+
+  support <- dat |> dplyr::group_by(abx_recency) |>
+    dplyr::summarise(lo = quantile(centered_error, clip[1], na.rm = TRUE),
+                     hi = quantile(centered_error, clip[2], na.rm = TRUE),
+                     n  = dplyr::n(), .groups = "drop")
+
+  pred_clipped <- pred |> dplyr::inner_join(support, by = "abx_recency") |>
+    dplyr::filter(centered_error >= lo, centered_error <= hi)
+
+  lab_n <- setNames(sprintf("%s (n = %d)",
+       as.character(support$abx_recency), support$n),
+      as.character(support$abx_recency))
+
+  p <- ggplot() +
+    geom_point(data = dat, aes(centered_error, partial_y, colour = abx_recency),
+        alpha = .15, size = 3) +
+    geom_rug(data = dat, aes(x = centered_error, colour = abx_recency), 
+             sides = "b", alpha = .5, length = unit(.03, "npc")) +
+    geom_ribbon(data = pred_clipped, aes(centered_error, ymin = conf.low, ymax = conf.high),
+                fill = "black", alpha = .3) +
+    geom_line(data = pred_clipped, aes(centered_error, predicted),
+       colour = "black", linewidth = 1) +
+    facet_wrap(~ abx_recency, nrow = 1, labeller = labeller(abx_recency = lab_n)) +
+    scale_color_manual(values = colors) +
+    #scale_fill_manual(values = colors) +
+    labs(x = "Centered BMI prediction error (metBMI \u2212 BMI)",
+         y = paste0(y_lab, "\n(partial residuals, mean BMI)")) +
+    theme_minimal(base_size = 14) + theme(legend.position = "none")
+  
+  invisible(list(plot = p, mod = mod, dat = dat, pred = pred_clipped,
+           support = support, vendor_adjusted = fit$vendor_adjusted))
+}
+```
+
+### 25-hydroxy Vitamin D
+```{r 25.OH.vitD, fig.width=6, fig.height=4}
+vitd_plot <- plot_chem(metBMI_labs, "VITAMIND_25_OHTOT", y_lab = "25-OH-D total (ng/mL)")
+vitd_plot$plot
+#car::Anova(out$mod, type = "II")     # same model object, no refitting
+```
+
+```{r save.corr.plot}
+# Save plot
+pdf("../figures/abx_recency_metBMI_25OHvitD.pdf", width = 6, height = 4)  # open a PDF device
+plot(vitd_plot$plot)
+dev.off()
+```
+
+### Basophils
+```{r}
+baso_plot <- plot_chem(metBMI_labs, "BASOPHILSABSOLUTE", y_lab = "check baso unit")
+baso_plot$plot
+```
+
+
+# Vitamin D sensitivity analyses
+
+## Check to see if this association is driven by supplement use or seasonality
+
+```{r read.vit.d.data}
+vit_d = read.csv('../data/vit_d_info_abx_clients.csv', 
+                   colClasses = c(public_client_id = "character"))
+
+metbmi_labs_vitd <- inner_join(
+  metBMI_labs,
+  vit_d,
+  by = "public_client_id")
+
+metbmi_labs_vitd$vitamin_d_flag <- factor(metbmi_labs_vitd$vitamin_d_flag)
+metbmi_labs_vitd$season <- factor(metbmi_labs_vitd$season)
+
+levels(metbmi_labs_vitd$vitamin_d_flag)
+levels(metbmi_labs_vitd$season)
+```
+
+```{r visualize.serum.vitd.supp.use}
+ggplot(metbmi_labs_vitd, aes(vitamin_d_flag, VITAMIND_25_OHTOT)) +
+  geom_boxplot() +
+  labs(title= "", x = "Vitamin D Supplement Use", y = "VITAMIND_25_OHTOT") +
+  facet_wrap(vars(abx_recency))
+```
+
+Alright this is really cool! The differences between Vitamin D supplement users
+and non-users is pretty apparent. 
+
+Let's rerun our model with the Vitamin D flag added!
+
+```{r run.lab.model.vit.d}
+# drop the one missing row to remove warnings
+subdat_vit_D <- metbmi_labs_vitd %>%
+  filter(!(is.na(VITAMIND_25_OHTOT) | is.na(vitamin_d_flag)))
+
+vit_d_supp_model <- lm(VITAMIND_25_OHTOT ~ sex + centered_age + centered_eGFR +
+                         meds_cholesterol + meds_blood_sugar + 
+                         PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + vendor +
+                         centered_error * abx_recency + 
+                         centered_BMI:abx_recency + centered_BMI:centered_error +
+                         season + vitamin_d_flag,
+                    data = subdat_vit_D)
+
+car::Anova(vit_d_supp_model, type = "II")
+```
+
+
+```{r save.facet.off}
+# pdf("figures/emmip_vitd_three_way_interaction.pdf", width = 6, height = 8)  # open a PDF device
+# plot(vit_d_emmip)
+# dev.off()
+```
+
+There are two large outliers in the model. They have Vit D 25-OH levels of
+~150 and ~200. The reference range for both lab vendors is 30-100 ng/mL, and levels
+of under <125 ng/mL are considered normal. Reassuringly, these two points are in
+the individuals who are taking the vitamin D supplements. However, I should perform
+another sensitivity analysis to see if the interaction is still significant after
+removing those points. 
+
+```{r remove.vitd.outliers}
+subdat_vit_D_clean <- subdat_vit_D[subdat_vit_D$VITAMIND_25_OHTOT < 150]
+
+vit_d_supp_model_clean <- lm(VITAMIND_25_OHTOT ~ sex + centered_age + centered_eGFR +
+                         meds_cholesterol + meds_blood_sugar + 
+                         PC1 + PC2 + PC3 + PC4 + PC5 + centered_BMI + vendor +
+                         centered_error * abx_recency + 
+                         centered_BMI:abx_recency + centered_BMI:centered_error +
+                         season + vitamin_d_flag,
+                    data = subdat_vit_D_clean)
+
+car::Anova(vit_d_supp_model_clean, type = "II")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

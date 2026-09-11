@@ -1,0 +1,426 @@
+---
+title: "metabolite_meta_analysis"
+author: "Crystal Perez"
+date: "2025-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ComplexHeatmap)
+library(circlize)  # for color functions
+library(RColorBrewer)
+```
+
+## Read in metabolite data
+We'll be making two subplots here: one version with abx only information, and 
+the other with all the comparisons from published literature. The 3 month group 
+data will still be shown so it's easier to compare directionality. 
+
+```{r read.data}
+metab_betas = read.csv("../data/metabolite_abx_regressions_betas.csv")
+q_values = read.csv("../data/metabolite_abx_regressions_qs.csv")
+
+rownames(metab_betas) = metab_betas$plot_name
+metab_betas$plot_name <- NULL
+
+rownames(q_values) = q_values$plot_name
+q_values$plot_name <- NULL
+
+metabs_sorted <- metab_betas[order(metab_betas[, "abx_three"], decreasing = TRUE), ]
+```
+
+```{r rename.cols}
+rename_vec <-  c(
+    abx_three = "0 - 3 mo.",
+    abx_twelve = "3 - 12 mo.",
+    sol_beta_three   = "0 - 3 mo. (s)",
+    sol_beta_six  = "3 - 6 mo.",
+    beta_binary = "Any abx/5y.",
+    beta_total = "Total/5 y."
+  )
+
+colnames(metabs_sorted) <- dplyr::recode(colnames(metabs_sorted), !!!rename_vec)
+#metabs_sorted <- dplyr::rename_with(metabs_sorted, ~ rename_vec[.x], .cols = everything())
+```
+
+## Create abx subplot
+
+```{r p.val.fxn}
+# Significance annotation logic
+stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  if (p < 0.1)  return("#")
+  return("")
+}
+
+# This is for use with Yousri 2021 later
+stars_bonf <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 6.05e-5) return("*")
+  return("")
+}
+```
+
+### Create annotations
+```{r}
+sub_pathway <- metabs_sorted$SUB_PATHWAY
+
+# Unique categories
+unique_categories <- unique(sub_pathway)
+
+# Assign colors from Paired palette (up to 12 colors)
+palette <- colorRampPalette(brewer.pal(12, "Paired"))(15)
+#category_colors <- setNames(palette[1:length(unique_categories)], unique_categories)
+
+category_colors <- c(
+  "Benzoate Metabolism" = "#A6CEE3",
+  "Food Component/Plant" = "#3B8ABE", 
+  "Secondary Bile Acid Metabolism" = "#B15928",
+  "Fatty Acid Metabolism (Acyl Carnitine, Short Chain)" = "#72B29C",
+  "Fatty Acid, Monohydroxy" = "#84C868",
+  "Fatty Acid, Dicarboxylate" = "#4F9F3B",
+  "Androgenic Steroids" = "#EEDB80" ,
+  "Leucine, Isoleucine and Valine Metabolism" = "#EC9A91",
+  "Tyrosine Metabolism" = "#E93E3F",
+  "Tryptophan Metabolism" = "#F06C45",
+  "Phenylalanine Metabolism" = "#FDAC4F",
+  "Histidine Metabolism" = "#FB820F",
+  "Glutathione Metabolism" =  "#D1AAB7",
+  "Methionine, Cysteine, SAM and Taurine Metabolism" = "#8C66AF",
+  "Unknown" = "#A99099"
+)
+
+gene_microbe_colors <- c(
+  'Genetics' = 'black',
+  'Microbiome' = '#dbb17c',
+  'Hybrid' = '#7a5321',
+  'N/A' = '#FAEBD7')
+
+row_anno <- rowAnnotation(
+  SUB_PATHWAY = sub_pathway,
+  Determinant_Association = metabs_sorted$Determinant_Association,
+  col = list(
+    SUB_PATHWAY = category_colors,
+    Determinant_Association = gene_microbe_colors),
+  simple_anno_size = unit(3, "mm"),
+  show_annotation_name = FALSE,
+  gp = gpar(col = "#808080", lwd = 0.15)
+)
+
+```
+
+
+### Plot
+```{r subset.cols}
+cols <- c("0 - 3 mo.", "3 - 12 mo.", "0 - 3 mo. (s)", "3 - 6 mo.", "Any abx/5y.", "Total/5 y.")
+q_cols <- c("abx_three", "abx_twelve", "sol_q_three", "sol_q_six", "q_binary", "q_total")
+
+abx_matrix <- as.matrix(metabs_sorted[, cols])
+rownames(abx_matrix) <- rownames(metabs_sorted)
+
+q_matrix <- as.matrix(q_values[, q_cols])
+qval_mat <- q_matrix[rownames(abx_matrix), ]
+```
+
+
+```{r fig.height=8, fig.width=10}
+abx_col_fun <- colorRamp2(c(-0.5, 0, 0.5), c("blue", "white", "red")) 
+col_split = c("Arivale", "Arivale", "HCHS/SOL", "HCHS/SOL", "MetaCardis", "MetaCardis")
+
+abx_ht <- Heatmap(abx_matrix,
+                  name = "Beta coefficient",
+                  col = abx_col_fun,
+                  na_col = "#C0C0C0",
+                  left_annotation = row_anno,
+                  column_split = col_split,
+                  column_names_rot = 45,
+                  column_names_gp = gpar(fontsize = 10),
+                  column_gap = unit(2, "mm"),
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = TRUE, 
+                  row_names_side = "left", 
+                  row_names_gp = gpar(fontsize = 10),
+                  height = unit(nrow(abx_matrix) * 5, "mm"),
+                  rect_gp = gpar(col ="#808080", lwd = 1), 
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- qval_mat[i, j]
+                     star <- stars(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 10, col = "black"))}
+                   )
+abx_ht
+```
+
+Save subplot A below!
+
+```{r}
+pdf("../figures/metabs_abx_arivale_sol_metacardis.pdf", width = 10, height = 8)  # open a PDF device
+plot(abx_ht)                                
+dev.off()                                 
+```
+
+## Now make subplot for literature comparison
+
+```{r read.data.lit.comp}
+lit_metab_values = read.csv("../data/metabolite_literature_values.csv")
+lit_q_values = read.csv("../data/metabolite_literature_qs.csv")
+
+rownames(lit_metab_values) = lit_metab_values$plot_name
+lit_metab_values$plot_name <- NULL
+
+rownames(lit_q_values) = lit_q_values$plot_name
+lit_q_values$plot_name <- NULL
+
+colnames(lit_metab_values)
+```
+
+
+```{r subset.data}
+lit_cols <- c(
+  "abx_three", "blood_sugar_meds",
+  "mc_t2dm_beta",
+  "Qatari_t2d_beta",
+  "IFG_OR", "IGT_OR", "CGI_T2D_OR",
+  "li_t2dm_hr"
+  )
+
+lit_q_cols <- c(
+  "abx_three", "blood_sugar_meds",
+  "mc_t2dm_q",
+  "Qatari_t2d_rawp",
+  "IFG_p_adj", "IGT_p_adj", "CGI_T2D_p_adj",
+  "li_t2dm_fdr"
+  )
+  
+# Save the subpathway
+lit_metab_values$SUB_PATHWAY[lit_metab_values$SUB_PATHWAY == ""] <- "Unknown"
+sub_pathway_plot_b <- lit_metab_values$SUB_PATHWAY
+sub_pathway_plot_b
+```
+
+
+```{r generate.matrices}
+# These are the columns for which I did the analyses
+my_cols <- c(
+  "abx_three",
+  "blood_sugar_meds",
+  "mc_t2dm_beta"
+)
+
+# From published literature
+beta_cols <- c("Qatari_t2d_beta")
+or_cols <- c("IFG_OR", "IGT_OR", "CGI_T2D_OR")
+hr_cols <- c("li_t2dm_hr")
+
+# Generate matrices for the actual values
+my_matrix <- as.matrix(lit_metab_values[, my_cols])
+rownames(my_matrix) <- rownames(lit_metab_values)
+
+beta_matrix <-  as.matrix(lit_metab_values[, beta_cols])
+or_matrix   <- as.matrix(lit_metab_values[, or_cols])
+hr_matrix   <- as.matrix(lit_metab_values[, hr_cols])
+
+# Now for the p-vales (whether FDR or raw)
+my_qs <- as.matrix(lit_q_values[, c("abx_three","blood_sugar_meds","mc_t2dm_q")])
+rownames(my_qs) <- rownames(lit_metab_values)
+
+beta_qs <- as.matrix(lit_q_values[, c("Qatari_t2d_rawp")])
+or_qs   <- as.matrix(lit_q_values[, c("IFG_p_adj", "IGT_p_adj", "CGI_T2D_p_adj")])
+hr_qs   <- as.matrix(lit_q_values[, c("li_t2dm_fdr")])
+```
+
+And plot!
+
+```{r, fig.width=10, fig.height=10}
+beta_col_fun <- colorRamp2(c(-1, 0, 1), c("blue", "white", "red")) 
+or_col_fun   <- colorRamp2(c(0.5, 1, 2.5), c("#008080", "white", "#800000")) 
+hr_col_fun   <- colorRamp2(c(0.8, 1, 1.2), c("#191970", "white", "#FF1493"))
+
+# Define gaps (e.g., split by study)
+my_split = c("Arivale", "Arivale", "MetaCardis")
+beta_split = c("Qatari")
+or_split = c("Swedish", "Swedish", "Swedish")
+hr_split = c("SOL+")
+```
+
+```{r abx.v.t2d.direction}
+abx_concordant_metabs <- c(
+  "hippurate",
+  "cinnamoylglycine",
+  "3-phenylpropionate (hydrocinnamate)",
+  "indolepropionate",
+  "isoursodeoxycholate"
+)
+
+neither <- c("X - 15728", "X - 12544", "X - 12283","X - 17351", "X - 12216","X - 17335",
+             "5-hydroxyhexanoate", "phenyllactate (PLA)","2-piperidinone",
+             "3-(3-hydroxyphenyl)propionate","glutarate (C5-DC)",
+             "hydantoin_5_propionate","5alpha-androstan-3beta,17alpha-diol disulfate",
+             "4-hydroxyhippurate","acetylcarnitine-C2",
+             "3-(4-hydroxyphenyl)lactate", "hydantoin-5-propionate"
+             )
+
+abx_concordance <- dplyr::case_when(
+  rownames(my_matrix) %in% abx_concordant_metabs ~ "Concordant",
+  rownames(my_matrix) %in% neither               ~ "Neither",
+  TRUE                                           ~ "Discordant"
+)
+
+concordance_colors <- c(
+  "Concordant" = "yellowgreen",
+  "Discordant" = "black",
+  "Neither" = "white"
+)
+
+is_sig <- function(p, thresh = 0.1) !is.na(p) & p < thresh
+t2dm_sig_count <-
+  is_sig(my_qs[,  "mc_t2dm_q"])                 +   # MetaCardis
+  is_sig(beta_qs[, 1], thresh = 6.05e-5) +   # Qatari (Bonferroni)
+  is_sig(or_qs[,  "IFG_p_adj"])                 +   # Swedish 1
+  is_sig(or_qs[,  "IGT_p_adj"])                 +   # Swedish 2
+  is_sig(or_qs[,  "CGI_T2D_p_adj"])             +   # Swedish 3
+  is_sig(hr_qs[,  1])                               # SOL+
+
+ord <- order(
+  factor(abx_concordance, levels = c("Concordant", "Discordant")),
+  -sign(my_matrix[, "abx_three"]),   # Postive on top
+  -t2dm_sig_count,                   # within same sign: more sig. T2DM cohorts on top
+  -my_matrix[, "abx_three"]          # final tie-breaker: actual value
+)
+
+# --- 2. Apply that SAME permutation to everything the plot indexes ----------
+# Value matrices (drop = FALSE keeps single-column matrices as matrices)
+my_matrix   <- my_matrix[ord, , drop = FALSE]
+beta_matrix <- beta_matrix[ord, , drop = FALSE]
+or_matrix   <- or_matrix[ord, , drop = FALSE]
+hr_matrix   <- hr_matrix[ord, , drop = FALSE]
+
+# q-value matrices  <-- these are what the stars read; they MUST match
+my_qs   <- my_qs[ord, , drop = FALSE]
+beta_qs <- beta_qs[ord, , drop = FALSE]
+or_qs   <- or_qs[ord, , drop = FALSE]
+hr_qs   <- hr_qs[ord, , drop = FALSE]
+
+# Annotation vectors
+sub_pathway_plot_b <- sub_pathway_plot_b[ord]
+abx_concordance    <- abx_concordance[ord]
+
+# --- 4. Build the row annotation (uses A's category_colors) -----------------
+row_anno <- rowAnnotation(
+  SUB_PATHWAY = sub_pathway_plot_b,
+  `Abx recency concordance` = abx_concordance,
+  col = list(
+    SUB_PATHWAY = category_colors,
+    `Abx recency concordance` = concordance_colors),
+  simple_anno_size = unit(3, "mm"),
+  show_annotation_name = FALSE,
+  gp = gpar(col = "#808080", lwd = 0.15)
+)
+```
+
+```{r fig.width=12, fig.height=10}
+my_ht <- Heatmap(my_matrix,
+                  name = "Beta-coefficient",
+                  col = beta_col_fun,
+                  na_col = "#C0C0C0",
+                  left_annotation = row_anno,
+                  column_split = my_split,
+                  column_names_rot = 45,
+                  column_names_gp = gpar(fontsize = 10),
+                  column_gap = unit(2, "mm"),
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = TRUE, 
+                  row_names_max_width = grid::unit(8, "cm"),
+                  row_names_side = "left", 
+                  row_names_gp = gpar(fontsize = 10),
+                  height = unit(nrow(my_matrix) * 5, "mm"),
+                  rect_gp = gpar(col ="#808080", lwd = 1), 
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- my_qs[i, j]
+                     star <- stars(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 10, col = "black"))
+                     }
+                   )
+
+beta_ht <- Heatmap(beta_matrix,
+                  name = "Beta coefficient",
+                  col = beta_col_fun,
+                  na_col = "#C0C0C0",
+                  column_split = beta_split,
+                  column_names_rot = 45,
+                  column_names_gp = gpar(fontsize = 10),
+                  column_gap = unit(2, "mm"),
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = TRUE, 
+                  row_names_side = "left", 
+                  row_names_gp = gpar(fontsize = 10),
+                  height = unit(nrow(beta_matrix) * 5, "mm"),
+                  rect_gp = gpar(col ="#808080", lwd = 1), 
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- beta_qs[i, j]
+                     star <- stars_bonf(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 10, col = "black"))
+                     }
+                   )
+
+or_ht <- Heatmap(or_matrix,
+                  name = "Odds Ratio",
+                  col = or_col_fun,
+                  na_col = "#C0C0C0",
+                  column_split = or_split,
+                  column_names_rot = 45,
+                  column_names_gp = gpar(fontsize = 10),
+                  column_gap = unit(2, "mm"),
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = TRUE, 
+                  row_names_side = "left", 
+                  row_names_gp = gpar(fontsize = 10),
+                  height = unit(nrow(beta_matrix) * 5, "mm"),
+                  rect_gp = gpar(col ="#808080", lwd = 1), 
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- or_qs[i, j]
+                     star <- stars(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 10, col = "black"))
+                     }
+                   )
+hr_ht <- Heatmap(hr_matrix,
+                  name = "Hazard Ratio",
+                  col = hr_col_fun,
+                  na_col = "#C0C0C0",
+                  column_split = hr_split,
+                  column_names_rot = 45,
+                  column_names_gp = gpar(fontsize = 10),
+                  column_gap = unit(2, "mm"),
+                  cluster_rows = FALSE,
+                  cluster_columns = FALSE,
+                  show_row_names = TRUE, 
+                  row_names_side = "left", 
+                  row_names_gp = gpar(fontsize = 10),
+                  height = unit(nrow(beta_matrix) * 5, "mm"),
+                  rect_gp = gpar(col ="#808080", lwd = 1), 
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+                     pval <- hr_qs[i, j]
+                     star <- stars(pval)
+                     grid.text(star, x, y, gp = gpar(fontsize = 10, col = "black"))
+                     }
+                   )
+
+lit_ht <- my_ht + beta_ht + or_ht + hr_ht
+lit_ht
+```
+
+```{r}
+pdf("../figures/metabs_in_t2d_literature.pdf",
+    width = 12, height = 10)  # open a PDF device
+plot(lit_ht)                                
+dev.off()  
+```
+
+

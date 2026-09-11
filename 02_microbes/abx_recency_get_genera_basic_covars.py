@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 # Read and sort abx use data
-abx_covar = pd.read_csv("data/abx_covariates_with_statins_a1c_base_covars.csv")
+abx_covar = pd.read_csv("../data/abx_covariates_with_statins_a1c_base_covars.csv")
 abx_covar = abx_covar.sort_values(by="days_in_program")
 
 # Read and sort ASVS
@@ -91,4 +91,4 @@ taxa_pivot_genus.reset_index(inplace=True)
 taxa_pivot_genus.columns.name = None
 
 ###### Save raw count table #####
-taxa_pivot_genus.to_csv("data/rh_abx_genus_level_counts_base_covar.csv", index=False)
+taxa_pivot_genus.to_csv("../data/rh_abx_genus_level_counts_base_covar.csv", index=False)

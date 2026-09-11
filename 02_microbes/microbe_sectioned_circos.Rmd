@@ -1,0 +1,228 @@
+---
+title: "microbe_sectioned_circos"
+author: "Crystal Perez"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(forcats)
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r read}
+# --- OR / logistic ---
+microbe_ORs = read.csv("../data/sig_logit_all_ors_rarefied.csv")
+q_values_OR = read.csv("../data/sig_logit_all_qs_rarefied.csv")
+rownames(microbe_ORs) = microbe_ORs$plot_name
+rownames(q_values_OR) = q_values_OR$plot_name
+q_values_OR$plot_name <- NULL; q_values_OR$feature <- NULL
+
+# --- CLR / beta ---
+microbe_betas = read.csv("../data/microbe_betas_sugar_chol_abx_10percent.csv")
+q_values_beta = read.csv("../data/microbe_qs_sugar_chol_abx_10percent.csv")
+rownames(microbe_betas) = microbe_betas$plot_name
+rownames(q_values_beta) = q_values_beta$plot_name
+q_values_beta$plot_name <- NULL; q_values_beta$feature <- NULL
+```
+
+```{r define.sections}
+or_names   <- rownames(microbe_ORs)
+clr_names  <- rownames(microbe_betas)
+
+shared    <- intersect(or_names, clr_names)     # 40
+or_only   <- setdiff(or_names,  clr_names)      # 83
+clr_only  <- setdiff(clr_names, or_names)       # 39
+
+# Single-analysis sectors: order by that analysis' 3-month group (abx_three), DESC.
+or_only_sorted  <- or_only[ order(microbe_ORs[or_only,   "abx_three"], decreasing = TRUE) ]
+clr_only_sorted <- clr_only[order(microbe_betas[clr_only, "abx_three"], decreasing = TRUE) ]
+# Shared sector: keep OR df abx_three-descending order (skill convention).
+shared_sorted   <- shared[  order(microbe_ORs[shared,    "abx_three"], decreasing = TRUE) ]
+
+# Combined row order for every matrix (sector blocks, in draw order):
+taxa_order <- c(or_only_sorted, shared_sorted, clr_only_sorted)
+
+# Sector factor -> controls sector placement order around the circle.
+split_fac <- factor(
+  c(rep("Logit only", length(or_only_sorted)),
+    rep("Shared",     length(shared_sorted)),
+    rep("CLR only",   length(clr_only_sorted))),
+  levels = c("Logit only", "Shared", "CLR only"))
+
+stopifnot(length(taxa_order) == length(split_fac))
+```
+
+```{r rename.cols}
+rename_vec <- c(abx_twelve = "3 - 12 mo.", abx_three = "0 - 3 mo.")
+colnames(microbe_ORs)   <- recode(colnames(microbe_ORs),   !!!rename_vec)
+colnames(microbe_betas) <- recode(colnames(microbe_betas), !!!rename_vec)
+# CRITICAL: rename q-value cols too so stars are selected by matching names.
+colnames(q_values_OR)   <- recode(colnames(q_values_OR),   !!!rename_vec)
+colnames(q_values_beta) <- recode(colnames(q_values_beta), !!!rename_vec)
+```
+
+```{r stars}
+# Preserve significance mapping verbatim (note: '#' trend tier at p < 0.1).
+stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  if (p < 0.1)   return("#")
+  return("")
+}
+```
+
+```{r matrices}
+# 12-mo OUTER, 3-mo INNER  -> 12-mo column first.
+val_cols <- c("3 - 12 mo.", "0 - 3 mo.")
+q_cols   <- c("0 - 3 mo.", "3 - 12 mo.")
+
+# Helper: place a source df's columns onto the full union row order; missing rows -> NA.
+align_mat <- function(df, rows, cols) {
+  m <- matrix(NA_real_, nrow = length(rows), ncol = length(cols),
+              dimnames = list(rows, cols))
+  present <- intersect(rows, rownames(df))
+  m[present, ] <- as.matrix(df[present, cols])
+  m
+}
+
+OR_matrix   <- align_mat(microbe_ORs,   taxa_order, val_cols)
+beta_matrix <- align_mat(microbe_betas, taxa_order, val_cols)
+
+# q-value matrices aligned to the SAME rows & column names as the value matrices.
+qval_mat_OR   <- align_mat(q_values_OR,   taxa_order, q_cols)
+qval_mat_beta <- align_mat(q_values_beta, taxa_order, q_cols)
+
+# Sanity: all matrices share identical row order.
+stopifnot(identical(rownames(OR_matrix),   taxa_order))
+stopifnot(identical(rownames(beta_matrix), taxa_order))
+stopifnot(identical(rownames(qval_mat_OR),   taxa_order))
+stopifnot(identical(rownames(qval_mat_beta), taxa_order))
+```
+
+```{r annotations}
+# Prevalence + phylum: prefer OR df; fall back to CLR df for CLR-only taxa.
+anno_src <- function(taxon, field) {
+  if (taxon %in% rownames(microbe_ORs))   return(microbe_ORs[taxon,   field])
+  if (taxon %in% rownames(microbe_betas)) return(microbe_betas[taxon, field])
+  NA
+}
+anno_prevalence <- vapply(taxa_order, anno_src, numeric(1),   field = "prevalence")
+anno_phyla      <- vapply(taxa_order, anno_src, character(1), field = "Phylum")
+stopifnot(!any(is.na(anno_phyla)))
+```
+
+```{r colors}
+phyla_colors <- c(
+  "Actinobacteria"     = "#9400D3",
+  "Bacteroidetes"      = "#FF8C00",
+  "Cyanobacteria"      = "#00FFE2",
+  "Firmicutes"         = "#4682B4",
+  "Fusobacteria"       = "#DC143C",
+  "Lentisphaerae"      = "#C1AD09",
+  "Patescibacteria"    = "#FF69B4",
+  "Proteobacteria"     = "#33a02c",
+  "Tenericutes"        = "#FFFF00",
+  "Verrucomicrobia"    = "#A0522D",
+  "Epsilonbacteraeota" = "#AEDF12",
+  "Synergistetes"      = "#D2B48C",
+  "Euryarchaeota"      = "#FFE2FD")
+
+cont_colors <- colorRamp2(c(min(anno_prevalence, na.rm = TRUE),
+                            median(anno_prevalence, na.rm = TRUE),
+                            max(anno_prevalence, na.rm = TRUE)),
+                          c("lightgrey", "dimgrey", "black"))
+or_col_fun   <- colorRamp2(c(0.5, 1, 3), c("#008080", "#F7F7F7", "#800000"))
+beta_col_fun <- colorRamp2(c(-1, 0, 1),  c("blue", "white", "red"))
+```
+
+```{r circos, fig.height=8, fig.width=9}
+pdf("../figures/circos_sectioned_OR_CLR.pdf", width = 9, height = 8)
+circos.clear(); circos.par(RESET = TRUE)
+# gap.after: small gaps between the three sectors, larger opening back to start (top).
+circos.par(start.degree = 90,
+           gap.after = c("Logit only" = 3, "Shared" = 3, "CLR only" = 15),
+           cell.padding = c(0, 0, 0, 0))
+
+# --- Ring 1 (OUTER): OR heatmap ---
+circos.heatmap(OR_matrix, split = split_fac, col = or_col_fun, na.col = "white",
+               cluster = FALSE,
+               rownames.side = "outside", rownames.cex = 0.5,
+               track.height = 0.10, bg.border = "black", bg.lwd = 0.4)
+or_track <- get.current.track.index()
+n_col_OR <- ncol(OR_matrix)
+circos.track(track.index = or_track, bg.border = NA, panel.fun = function(x, y) {
+  ind <- CELL_META$subset[CELL_META$row_order]
+  for (j in seq_len(n_col_OR)) {
+    lab <- vapply(ind, function(i) stars(qval_mat_OR[i, j]), character(1))
+    circos.text(seq_along(ind) - 0.5, rep(j - 0.5, length(ind)), lab,
+                cex = 0.35, col = "black", facing = "clockwise", niceFacing = TRUE)
+  }
+})
+
+# --- Ring 2: CLR / beta heatmap ---
+circos.heatmap(beta_matrix, col = beta_col_fun, na.col = "white",
+               cluster = FALSE,
+               track.height = 0.10, bg.border = "black", bg.lwd = 0.4)
+beta_track <- get.current.track.index()
+n_col_beta <- ncol(beta_matrix)
+circos.track(track.index = beta_track, bg.border = NA, panel.fun = function(x, y) {
+  ind <- CELL_META$subset[CELL_META$row_order]
+  for (j in seq_len(n_col_beta)) {
+    lab <- vapply(ind, function(i) stars(qval_mat_beta[i, j]), character(1))
+    circos.text(seq_along(ind) - 0.5, rep(j - 0.5, length(ind)), lab,
+                cex = 0.35, col = "black", facing = "clockwise", niceFacing = TRUE)
+  }
+})
+
+# --- Ring 3: prevalence annotation ---
+prev_mat <- matrix(anno_prevalence, ncol = 1,
+                   dimnames = list(taxa_order, "Prevalence"))
+circos.heatmap(prev_mat, col = cont_colors, cluster = FALSE,
+               track.height = 0.03, bg.border = "black", bg.lwd = 0.1)
+
+# --- Ring 4 (INNER): phylum annotation ---
+phy_mat <- matrix(anno_phyla, ncol = 1,
+                  dimnames = list(taxa_order, "Phylum"))
+circos.heatmap(phy_mat, col = phyla_colors, cluster = FALSE,
+               track.height = 0.03, bg.border = "black", bg.lwd = 0.1)
+
+# Sector labels at the outer edge.
+circos.track(track.index = 1, bg.border = NA, panel.fun = function(x, y) {
+  circos.text(CELL_META$xcenter, CELL_META$cell.ylim[2] + convert_y(9, "mm"),
+              CELL_META$sector.index, cex = 0.7, font = 2,
+              facing = "bending.inside", niceFacing = TRUE)
+})
+
+# --- Legends ---
+lgd_or <- Legend(title = "Odds Ratio", col_fun = or_col_fun,
+                 title_position = "leftcenter-rot",
+                 legend_height = unit(2, "cm"), grid_width = unit(3, "mm"),
+                 title_gp = gpar(fontsize = 9, fontface = "bold"),
+                 labels_gp = gpar(fontsize = 8))
+lgd_beta <- Legend(title = "Beta Coefficient", col_fun = beta_col_fun,
+                   title_position = "leftcenter-rot",
+                   legend_height = unit(2, "cm"), grid_width = unit(3, "mm"),
+                   title_gp = gpar(fontsize = 9, fontface = "bold"),
+                   labels_gp = gpar(fontsize = 8))
+lgd_prev <- Legend(title = "Prevalence", col_fun = cont_colors,
+                   title_position = "leftcenter-rot",
+                   legend_height = unit(2, "cm"), grid_width = unit(3, "mm"),
+                   title_gp = gpar(fontsize = 9, fontface = "bold"),
+                   labels_gp = gpar(fontsize = 8))
+lgd_phy <- Legend(title = "Phylum", legend_gp = gpar(fill = phyla_colors),
+                  labels = names(phyla_colors), title_position = "topleft",
+                  grid_height = unit(3, "mm"), grid_width = unit(3, "mm"),
+                  title_gp = gpar(fontsize = 9, fontface = "bold"),
+                  labels_gp = gpar(fontsize = 7))
+draw(packLegend(lgd_or, lgd_beta, lgd_prev, lgd_phy, gap = unit(4, "mm")),
+     x = unit(0.88, "npc"), y = unit(0.3, "npc"), just = "left")
+
+circos.clear()
+dev.off()
+```

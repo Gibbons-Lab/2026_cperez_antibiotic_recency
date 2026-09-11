@@ -3,9 +3,11 @@ import numpy as np
 
 from rich.progress import track
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
 from statsmodels.formula.api import ols
 from statsmodels.stats.multitest import multipletests
 from scipy import stats
+import os
 
 from patsy import dmatrices
 from patsy import dmatrix
@@ -210,7 +212,7 @@ def run_year_interaction_regressions(col_to_iterate, data, outcome_var, categori
 
     if categorical_pred == False:
         for cont_variable in col_to_iterate:
-            formula = (f"{outcome_var} ~ C(sex) + age + BMI_CALC + C(abx_year)*{cont_variable} +" 
+            formula = (f"{outcome_var} ~ C(sex) + age + BMI_CALC + C(abx_year)*{cont_variable} + "
                        f"C(meds_cholesterol) + C(meds_blood_sugar) + PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR")
             fitted = ols(formula, data=data).fit()
     
@@ -227,7 +229,7 @@ def run_year_interaction_regressions(col_to_iterate, data, outcome_var, categori
                 })
     else:   
         for microbe in col_to_iterate:
-            formula = (f"{outcome_var} ~ C(sex) + age + BMI_CALC + C(abx_year)*C({microbe} + C(vendor_dashboard) +" 
+            formula = (f"{outcome_var} ~ C(sex) + age + BMI_CALC + C(abx_year)*C({microbe}) + C(vendor_dashboard) +" 
                        f"C(meds_cholesterol) + C(meds_blood_sugar) + PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR")
             fitted = ols(formula, data=data).fit()
     
@@ -358,7 +360,7 @@ def make_barbell_plot(metabolite, data_raw, data_tests):
         zerolinewidth=2     
     )
     
-    fig.write_image(f"figures/microbe_metab_{metabolite}_interactions_mean_difference.pdf", width=700, height=110 + (20 * len(barbell_data_absent))) 
+    fig.write_image(f"../figures/microbe_metab_{metabolite}_interactions_mean_difference.pdf", width=700, height=110 + (20 * len(barbell_data_absent)), engine=None) 
     fig.show() 
 
 
@@ -423,7 +425,7 @@ def fast_interaction_screen(metabolites, data, outcome_var,
         XtX_inv = np.linalg.inv(X.T @ X)
         j = p - 1                                   # interaction column
 
-        if robust:                                  # HC3 robust SE
+        if robust:                                        # HC3 robust SE
             h = np.einsum("ij,jk,ik->i", X, XtX_inv, X)   # leverages
             u = resid / (1.0 - h)
             meat = (X * (u ** 2)[:, None]).T @ X
@@ -442,91 +444,307 @@ def fast_interaction_screen(metabolites, data, outcome_var,
         out["q_value"] = multipletests(out["p_value"], method="fdr_bh")[1]  # within-chemistry
     return out
 
-def make_slope_barbell(data_raw, data_tests, covariates,
-                       abx_col="abx_year", name_col="CHEMICAL_NAME",
-                       out_pdf="figures/abx_metab_chem_slope_barbell.pdf"):
-    """Build the combined barbell figure across ALL chemistries with hits.
+# moderator palette: 0 = none (no recent abx), 1 = past_year
+abx_year_pal = {0: "#007EA7", 1: "red"}
 
-    data_raw   : merged per-person frame (chemistries + metabolites + covariates + abx_col)
-    data_tests : the significant-hits table (needs columns: chemistry, metabolite; and
-                 optionally name_col for a pretty metabolite label)
-    covariates : list of RHS terms, e.g.
-                 ["C(sex)", "age", "BMI_CALC", "C(meds_cholesterol)",
-                  "C(meds_blood_sugar)", "PC1","PC2","PC3","PC4","PC5",
-                  "centered_eGFR", "C(vendor)"]
-    """
-    # map abx_col to 0/1 (handles "none"/"past_year" strings OR existing 0/1)
-    raw = data_raw.copy()
-    if raw[abx_col].dtype == object:
-        raw["_abx01"] = (raw[abx_col] != "none").astype(int)
+# black text + Helvetica everywhere (Liberation/Nimbus Sans substitute on Linux)
+FONT = dict(family="Helvetica, Arial, sans-serif", color="black", size=13)
+
+RECENCY_ORDER = ["none", "twelve", "three"]
+RECENCY_LABEL = {"none": "none", "twelve": "12mo", "three": "3mo"}
+abx_recency_pal = {'none': "#007ea7", 'twelve': "#80ced7", 'three': '#ccdbdc'}
+
+def _adjusted_slope(sub, chem, metab, covariates, standardize=True, min_n=20):
+    """Covariate-adjusted (optionally standardized) slope of chem ~ metab on one subset."""
+    d = sub[[chem, metab] + _cols(covariates)].dropna()
+    if d.shape[0] < min_n or d[chem].std() == 0 or d[metab].std() == 0:
+        return np.nan
+    if standardize:
+        y = ((d[chem] - d[chem].mean()) / d[chem].std()).values
+        x = ((d[metab] - d[metab].mean()) / d[metab].std()).values
     else:
-        raw["_abx01"] = raw[abx_col].astype(int)
+        y, x = d[chem].values, d[metab].values
+    rhs = " + ".join(covariates) if covariates else "1"
+    Xc = np.asarray(dmatrix(rhs, d, return_type="dataframe"), dtype=float)
+    X = np.column_stack([Xc, x])            # metab is the LAST column
+    beta, _, rank, _ = np.linalg.lstsq(X, y, rcond=None)
+    if rank < X.shape[1]:                   # collinear -> unreliable
+        return np.nan
+    return beta[-1]
 
+def _cols(covariates):
+    """Strip C(...) wrappers to raw column names for dropna."""
+    import re
+    out = []
+    for term in covariates:
+        m = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", term)
+        out.append(m[0] if m else term)
+    return list(dict.fromkeys(out))
+
+def _pooled_slopes(sub, chem, metab, covariates, recency_col, levels,
+                   standardize=True, min_n=20):
+    """Per-level metabolite->chemistry slopes from ONE pooled categorical fit.
+
+    Returns {level: slope} where slope[levels[0]] is the baseline metab coef and
+    the others are baseline + that level's interaction offset. None if degenerate.
+    These are the SAME numbers is_monotonic/clean_gradient were computed from.
+    """
+    cols = [chem, metab, recency_col] + _cols(covariates)
+    d = sub[cols].dropna()
+    d = d[d[recency_col].isin(levels)].copy()
+    if d.shape[0] < min_n or d[chem].std() == 0 or d[metab].std() == 0:
+        return None
+    if standardize:                                   # z-score ONCE across pooled sample
+        d["_y"] = (d[chem] - d[chem].mean()) / d[chem].std()
+        d["_x"] = d[metab] #(d[metab] - d[metab].mean()) / d[metab].std()
+    else:
+        d["_y"], d["_x"] = d[chem], d[metab]
+
+    covar_rhs = (" + " + " + ".join(covariates)) if covariates else ""
+    ref = levels[0]
+    fit = smf.ols(
+        f"_y ~ C({recency_col}, Treatment(reference='{ref}')) * _x {covar_rhs}",
+        data=d,
+    ).fit()
+
+    base = fit.params.get("_x", np.nan)               # none-group (reference) slope
+    slopes = {ref: base}
+    for lvl in levels[1:]:
+        inter = [c for c in fit.params.index
+                 if ":" in c and "_x" in c and f"[T.{lvl}]" in c]
+        off = fit.params[inter[0]] if inter else np.nan
+        slopes[lvl] = base + off                       # baseline + offset
+    return slopes
+
+def make_recency_barbell(data_raw, data_tests, covariates,
+                         recency_col="abx_recency", levels=RECENCY_ORDER,
+                         standardize=True, name_col="CHEMICAL_NAME",
+                         row_px=26, header_px=30, gap_px=16,
+                         out_pdf="../figures/recency_barbell_evenpitch.pdf"):
+    """Even-pitch stacked barbell figure on a single shared axis.
+
+    row_px    : pixels per metabolite row (constant for EVERY row -> even pitch)
+    header_px : vertical space reserved for each chemistry section header
+    gap_px    : blank spacer after each chemistry section
+    Returns (fig, bar_df).
+    """
+    os.makedirs(os.path.dirname(out_pdf) or ".", exist_ok=True)
+    raw = data_raw[data_raw[recency_col].isin(levels)].copy()
+    
     rows = []
     for _, hit in data_tests.iterrows():
         chem, metab = hit["chemistry"], hit["metabolite"]
         label = hit[name_col] if name_col in data_tests.columns else metab
-        is_ctrl = str(metab).lower() == str(chem).lower()   # self-pair positive control
-        for g in (0, 1):
-            sub = raw[raw["_abx01"] == g]
-            rows.append({
-                "chemistry": chem,
-                "metabolite": metab,
-                "row_label": f"{label} (+ctrl)" if is_ctrl else label,
-                "is_ctrl": is_ctrl,
-                "abx": g,
-                "slope": _adjusted_std_slope(sub, chem, metab, covariates),
-            })
-    bar = pd.DataFrame(rows).dropna(subset=["slope"])
+        is_ctrl = str(metab).lower() == str(chem).lower()
+        metab_label = f"{label}" + (" (+ctrl)" if is_ctrl else "")
+        print(metab_label)
 
-    # y-order: group by chemistry, then by the interaction gap within chemistry
-    gap = (bar.pivot_table(index=["chemistry", "row_label"], columns="abx",
-                           values="slope")
-              .assign(gap=lambda t: t[1] - t[0])
-              .reset_index())
-    gap = gap.sort_values(["chemistry", "gap"])
-    y_order = (gap["chemistry"] + " | " + gap["row_label"]).tolist()
-    bar["y"] = bar["chemistry"] + " | " + bar["row_label"]
+        slopes = _pooled_slopes(raw, chem, metab, covariates,
+                                recency_col, levels, standardize)
+        if slopes is None or any(pd.isna(list(slopes.values()))):
+            continue
+        for lvl in levels:
+            rows.append({
+                "chemistry": chem, "metabolite": metab,
+                "metab_label": metab_label, "is_ctrl": is_ctrl,
+                "level": lvl, "slope": slopes[lvl],
+            })
+    bar = pd.DataFrame(rows)
+    if bar.empty:
+        print("no hits with a full pooled-model track; check level labels / group sizes")
+        return None, bar
+    #return bar
+
+    # ---- ordering: chemistries alphabetical; rows DESC by none-group slope ----
+    ref = levels[0]
+    none_slope = (bar[bar["level"] == ref]
+                  .set_index(["chemistry", "metab_label"])["slope"])
+    chemistries = sorted(bar["chemistry"].unique())
+
+    # # ---- assign integer y-positions on ONE axis (top -> bottom => y descending) ----
+    # # We lay slots out top-to-bottom by DECREMENTING a cursor. Metabolite rows get
+    # # unique y values; headers/gaps consume vertical space but carry no dots.
+    y_cursor = 0.0
+    y_of_row = {}          # (chem, metab_label) -> y
+    header_y = {}          # chem -> y for its section header annotation
+    tickvals, ticktext = [], []
+
+    HEADER_UNITS = header_px / row_px    # express header/gap in "row" units so all
+    GAP_UNITS = gap_px / row_px          # spacing shares one coordinate scale
+    ROW_UNITS = 1.0
+
+    for ci, chem in enumerate(chemistries):
+        # header slot (sits just above this chemistry's first row)
+        y_cursor -= HEADER_UNITS
+        header_y[chem] = y_cursor + 0.15 * HEADER_UNITS
+        # print(header_y[chem])
+
+        sub = (bar[bar["chemistry"] == chem][["metab_label"]].drop_duplicates()
+               .assign(ns=lambda t, c=chem: t["metab_label"].map(
+                   lambda ml: none_slope.get((c, ml), np.nan)))
+               .sort_values("ns", ascending=False))
+        # print(sub)
+        for ml in sub["metab_label"]:
+            y_cursor -= ROW_UNITS
+            y_of_row[(chem, ml)] = y_cursor
+            tickvals.append(y_cursor)
+            ticktext.append(ml)
+        # gap before next chemistry (not after the last one)
+        if ci < len(chemistries) - 1:
+            y_cursor -= GAP_UNITS
+
+    y_bottom = y_cursor
+    y_top = 0.0
 
     fig = go.Figure()
 
-    # connecting bars first (so dots sit on top)
-    for y in bar["y"].unique():
-        s = bar[bar["y"] == y]
-        if len(s) == 2:
+    # connecting polyline per row (drawn first, below the dots)
+    for (chem, ml), y in y_of_row.items():
+        s = (bar[(bar["chemistry"] == chem) & (bar["metab_label"] == ml)]
+             .set_index("level").reindex(levels))
+        xs = s["slope"].values
+        for a, b in zip(range(len(levels) - 1), range(1, len(levels))):
             fig.add_shape(type="line", layer="below",
-                          y0=y, x0=s[s.abx == 0]["slope"].values[0],
-                          y1=y, x1=s[s.abx == 1]["slope"].values[0],
+                          x0=xs[a], y0=y, x1=xs[b], y1=y,
                           line=dict(color="lightgrey", width=2))
 
-    # dots, one trace per abx group; diamonds for positive controls
-    for g in (0, 1):
-        d = bar[bar["abx"] == g]
+    # one dot-trace per recency level; diamonds mark positive controls
+    for lvl in levels:
+        d = bar[bar["level"] == lvl].copy()
+        d["_y"] = [y_of_row[(c, m)] for c, m in zip(d["chemistry"], d["metab_label"])]
         fig.add_trace(go.Scatter(
-            x=d["slope"], y=d["y"], mode="markers",
-            name=("none" if g == 0 else "past_year"),
-            marker=dict(
-                size=9, color=abx_year_pal[g],
-                symbol=np.where(d["is_ctrl"], "diamond", "circle"),
-                line=dict(width=1, color="black"),
-            ),
+            x=d["slope"], y=d["_y"], mode="markers",
+            name=RECENCY_LABEL.get(lvl, lvl),
+            customdata=np.stack([d["chemistry"], d["metab_label"]], axis=-1),
+            hovertemplate="%{customdata[0]} | %{customdata[1]}<br>slope=%{x:.3f}<extra></extra>",
+            marker=dict(size=10, color=abx_recency_pal.get(lvl, "grey"),
+                        symbol=np.where(d["is_ctrl"], "diamond", "circle"),
+                        line=dict(width=1, color="black")),
         ))
 
+    # chemistry section headers as left-aligned annotations (in paper x, data y)
+    for chem, y in header_y.items():
+        fig.add_annotation(
+            xref="paper", x=0.0, yref="y", y=y,
+            text=f"<b>{chem}</b>", showarrow=False,
+            xanchor="left", yanchor="middle",
+            font=dict(family="Arial", size=13, color="black"),
+        )
+
+    slope_lab = ("Standardized slope (pooled model)" if standardize
+                 else "Slope (pooled model)")
+    total_h = int(round((y_top - y_bottom) * row_px)) + 170
+
     fig.update_layout(
-        height=140 + 18 * bar["y"].nunique(), width=820,
-        title="abx_year-moderated metabolite -> chemistry interactions "
-              "(adjusted, standardized slopes)",
-        xaxis_title="Standardized adjusted slope of chemistry ~ metabolite "
-                    "(per abx group)",
-        yaxis_title="Chemistry | metabolite",
-        yaxis=dict(categoryorder="array", categoryarray=y_order[::-1],
-                   showgrid=True, gridcolor="lightgrey", gridwidth=0.5),
+        height=total_h, width=820,
+        title="Antibiotic-recency gradient in metabolite -> chemistry slopes",
+        xaxis_title=f"{slope_lab} of chemistry ~ metabolite",
+        plot_bgcolor="white", margin=dict(l=300, r=40, t=90, b=60),
+        legend_title="abx_recency",
+        font=FONT, title_font=FONT, legend=dict(font=FONT),
+        yaxis=dict(
+            range=[y_bottom - 0.6, y_top + 0.4],
+            tickmode="array", tickvals=tickvals, ticktext=ticktext,
+            tickfont=FONT, showgrid=False, zeroline=False,
+        ),
         xaxis=dict(showgrid=True, gridcolor="lightgrey", gridwidth=0.2,
-                   zeroline=True, zerolinecolor="darkgrey", zerolinewidth=2),
-        plot_bgcolor="white", margin=dict(l=220, r=40, t=80, b=50),
-        legend_title="abx_year",
+                   zeroline=True, zerolinecolor="darkgrey", zerolinewidth=2,
+                   title_font=FONT, tickfont=FONT),
     )
 
-    fig.write_image(out_pdf, width=820, height=140 + 18 * bar["y"].nunique())
-    fig.show()
+    fig.write_image(out_pdf, width=820, height=total_h)
+    print(f"wrote {out_pdf}  ({len(y_of_row)} hits across {len(chemistries)} chemistries)")
     return fig, bar
+    
+# def make_recency_barbell(data_raw, data_tests, covariates,
+#                          recency_col="abx_recency", levels=RECENCY_ORDER,
+#                          standardize=True, name_col="CHEMICAL_NAME",
+#                          row_px=26, header_px=30, gap_px=16,
+#                          out_pdf="../figures/recency_barbell_combined.pdf"):
+#     """Combined figure across ALL final hits; dots = pooled-model slopes.
+
+#     data_tests : final gated hits (cols: chemistry, metabolite; optional name_col)
+#     Returns (fig, bar_df).
+#     """
+#     os.makedirs(os.path.dirname(out_pdf) or ".", exist_ok=True)
+#     raw = data_raw[data_raw[recency_col].isin(levels)].copy()
+
+#     rows = []
+    # for _, hit in data_tests.iterrows():
+    #     chem, metab = hit["chemistry"], hit["metabolite"]
+    #     label = hit[name_col] if name_col in data_tests.columns else metab
+    #     is_ctrl = str(metab).lower() == str(chem).lower()
+    #     row_label = f"{chem} | {label}" + (" (+ctrl)" if is_ctrl else "")
+
+    #     slopes = _pooled_slopes(raw, chem, metab, covariates,
+    #                             recency_col, levels, standardize)
+    #     if slopes is None or any(pd.isna(list(slopes.values()))):
+    #         continue                                   # need a full track
+    #     for lvl in levels:
+    #         rows.append({
+    #             "chemistry": chem,
+    #             "metabolite": metab,
+    #             "row_label": row_label,
+    #             "is_ctrl": is_ctrl,
+    #             "level": lvl,
+    #             "slope": slopes[lvl],
+    #         })
+    # bar = pd.DataFrame(rows)
+    # if bar.empty:
+    #     print("no hits with a full pooled-model track; check level labels / group sizes")
+    #     return None, bar
+
+    # # row order: GROUP BY chemistry, then DESCENDING by the none-group slope
+    # ref = levels[0]
+    # none_slope = (bar[bar["level"] == ref]
+    #               .set_index("row_label")["slope"])
+    # meta = (bar[["chemistry", "row_label"]].drop_duplicates()
+    #         .assign(none_slope=lambda t: t["row_label"].map(none_slope))
+    #         .sort_values(["chemistry", "none_slope"], ascending=[True, False]))
+    # y_order = meta["row_label"].tolist()               # visual top -> bottom
+
+    # fig = go.Figure()
+
+    # # connecting polyline through the recency points (drawn first, dots on top)
+    # for rl in bar["row_label"].unique():
+    #     s = bar[bar["row_label"] == rl].set_index("level").reindex(levels)
+    #     xs = s["slope"].values
+    #     for a, b in zip(range(len(levels) - 1), range(1, len(levels))):
+    #         fig.add_shape(type="line", layer="below",
+    #                       y0=rl, x0=xs[a], y1=rl, x1=xs[b],
+    #                       line=dict(color="lightgrey", width=2))
+
+    # # one dot-trace per recency level; diamonds mark positive controls
+    # for lvl in levels:
+    #     d = bar[bar["level"] == lvl]
+    #     fig.add_trace(go.Scatter(
+    #         x=d["slope"], y=d["row_label"], mode="markers",
+    #         name=RECENCY_LABEL.get(lvl, lvl),
+    #         marker=dict(size=10, color=abx_recency_pal.get(lvl, "grey"),
+    #                     symbol=np.where(d["is_ctrl"], "diamond", "circle"),
+    #                     line=dict(width=1, color="black")),
+    #     ))
+
+    # slope_lab = "Standardized slope (pooled model)" if standardize else "Slope (pooled model)"
+    # h = 160 + 24 * len(y_order)
+    # fig.update_layout(
+    #     height=h, width=820,
+    #     title="Antibiotic-recency gradient in metabolite -> chemistry slopes",
+    #     xaxis_title=f"{slope_lab} of chemistry ~ metabolite",
+    #     yaxis_title="Chemistry | metabolite",
+    #     plot_bgcolor="white", margin=dict(l=260, r=40, t=80, b=50),
+    #     legend_title="abx_recency",
+    #     font=FONT, title_font=FONT, legend=dict(font=FONT),
+    #     # categoryarray is bottom->top, so reverse the visual top->bottom order
+    #     yaxis=dict(categoryorder="array", categoryarray=y_order[::-1],
+    #                showgrid=True, gridcolor="lightgrey", gridwidth=0.5,
+    #                title_font=FONT, tickfont=FONT),
+    #     xaxis=dict(showgrid=True, gridcolor="lightgrey", gridwidth=0.2,
+    #                zeroline=True, zerolinecolor="darkgrey", zerolinewidth=2,
+    #                title_font=FONT, tickfont=FONT),
+    # )
+
+    # fig.write_image(out_pdf, width=820, height=h, engine=None)
+    # print(f"wrote {out_pdf}  ({len(y_order)} hits, "
+    #       f"{bar['chemistry'].nunique()} chemistries)")
+    # return fig, bar

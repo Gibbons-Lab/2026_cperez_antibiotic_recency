@@ -7,11 +7,12 @@ import pandas as pd
 import numpy as np
 from joblib import Parallel, delayed
 from statsmodels.stats.multitest import multipletests
+sys.path.append(os.path.abspath(os.path.join('..')))
 from regression_functions import fast_interaction_screen
 
 # ---- Read + merge ------------
-labs_clean = pd.read_csv("data/clincal_chems_abx_users_clean.csv", dtype={'public_client_id': str})
-metabolites_merged = pd.read_csv("data/metabolites_merged_used_for_regressions.csv", dtype={'public_client_id': str})
+labs_clean = pd.read_csv("../data/clincal_chems_abx_users_clean.csv", dtype={'public_client_id': str})
+metabolites_merged = pd.read_csv("../data/metabolites_merged_used_for_regressions.csv", dtype={'public_client_id': str})
 
 # Grab vendor
 quest = labs_clean[labs_clean['vendor'] == 'Quest']
@@ -61,6 +62,6 @@ all_metab_abx_interactions["q_value_global"] = multipletests(
     all_metab_abx_interactions["p_value"], method="fdr_bh"
 )[1]
 
-all_metab_abx_interactions.to_csv("data/metabolite_abx_interactions_on_labs.csv", index=False)
+all_metab_abx_interactions.to_csv("../data/metabolite_abx_interactions_on_labs.csv", index=False)
 print(f"Done. {len(all_metab_abx_interactions)} interaction tests across "
       f"{all_metab_abx_interactions['chemistry'].nunique()} chemistries.")

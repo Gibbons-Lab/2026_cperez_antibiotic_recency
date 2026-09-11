@@ -1,0 +1,276 @@
+---
+title: "arivale_statins_enterotypes"
+author: "Crystal Perez"
+date: "2026-06-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Enterotype classification of antibiotic recency cohort
+
+```{r load.lib}
+library(DirichletMultinomial)
+library(S4Vectors)
+library(stats4)
+library(BiocGenerics)
+library(ggplot2)
+library(ComplexHeatmap)
+library(dplyr)
+```
+
+If DMM not installed, install it.
+
+```{r install.dmm}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("DirichletMultinomial")
+```
+
+Next, let's read in our data. 
+
+```{r read.data}
+counts = read.csv('data/rh_abx_cohort_rarefied_counts.csv',
+                  colClasses = c(X = "character"))
+
+names(counts)[1] <- "public_client_id"
+
+rownames(counts) <- counts$public_client_id
+counts$public_client_id <- NULL
+counts_matrix <- as.matrix(counts)
+```
+
+```{r enterotypes}
+fit <- readRDS("data/harmonized_abx_users_dmm_fit.rds")
+bic  <- sapply(fit, BIC)
+plot(bic, type="b", xlab="Number of Dirichlet Components", ylab="Model Fit")
+```
+
+
+```{r choose.min}
+best_fit <- fit[[4]]
+```
+
+# assign clusters for our script run
+
+```{r}
+# Sample-level cluster assignments
+clusters <- apply(mixture(best_fit), 1, which.max)
+result_df <- data.frame(sample = rownames(counts), cluster = clusters) # clusters
+#result_df$mixture_probs <- mixture(best_fit)                           # probs
+write.csv(result_df,
+          "data/dmm_clusters_mixture_probs_arivale_abx_recency_cohort.csv")
+```
+
+Let's look at the histogram of cluster probabilities. 
+
+```{r histogram.probs}
+#hist(result_df$mixture_probs[,4]) # Cool! all look p binary to me :D
+```
+
+Look at feature weights.
+
+```{r}
+# Feature (taxon) weights per cluster
+feature_weights <- as.data.frame(fitted(best_fit))
+colnames(feature_weights) <- c("c1", "c2", "c3", "c4")
+#write.csv(feature_weights, "data/dmm_feature_weights_arivale_abx.csv")
+```
+
+```{r heatmap.feat.weights}
+feature_matrix <- as.matrix(feature_weights)
+heatmap(feature_matrix)
+```
+Let's subset to find the most important features
+
+```{r}
+df_long <- feature_weights |>
+  tibble::rownames_to_column("feature") |>
+  pivot_longer(
+    -feature,
+    names_to = "cluster",
+    values_to = "weight"
+  )
+
+df_long |>
+  group_by(cluster) |>
+  slice_max(weight, n = 15) |>
+   dplyr::arrange(cluster, desc(weight))
+```
+
+```{r}
+top_df_long <- df_long |>
+  group_by(cluster) |>
+  slice_max(weight, n = 15) |>
+  ungroup()
+
+top_features <- unique(top_df_long$feature) # select features
+top_df <- feature_weights[top_features, ]   # select columns from large df
+mat <- as.matrix(top_df)                    # make into matrix
+rownames(mat) <- str_wrap(rownames(top_df), # wrap names
+                          width = 30)
+```
+
+Okay now calculate specificity
+
+```{r specificity.for.enterotypes}
+specificity <- apply(feature_weights, 1, function(x) {
+  max(x) - mean(x[-which.max(x)]) # calcs the difference between max and avg of other 3
+})
+
+feature_cluster <- apply(feature_weights, 1, which.max) # finds which cluster most associated
+
+spec_df <- data.frame(
+  feature = rownames(feature_weights),
+  assigned_cluster = feature_cluster,  # which cluster a feature is most associated with
+  specificity = specificity            # diff between that and the other clusters
+)
+
+# This would show the top features for cluster 1
+spec_df |>
+  dplyr::filter(assigned_cluster == 1) |>
+  dplyr::arrange(desc(specificity))
+
+# Select top 10 features for each cluster
+top_distinguishing <- spec_df |>
+  group_by(assigned_cluster) |>
+  slice_max(specificity, n = 10)
+
+# Find all features that were in this top 10
+features <- top_distinguishing$feature
+
+mat <- as.matrix(feature_weights[features, ])
+rownames(mat) <- stringr::str_wrap(rownames(mat), 30)
+
+# row-wise z-score scaling
+mat_scaled <- t(scale(t(mat)))
+
+Heatmap(
+  mat_scaled,
+  name = "Z-score",
+  cluster_columns = FALSE,
+  row_names_side = "left",
+  row_names_gp = grid::gpar(fontsize = 6),
+  row_names_max_width = grid::unit(12, "cm")
+)
+```
+
+```{r assign.entero.labels}
+result_df <- result_df %>%
+  mutate(
+    enterotype = case_when(
+      cluster == 1 ~ "Bac1",
+      cluster == 2 ~ "Rum",
+      cluster == 3 ~ "Bac2",
+      cluster == 4 ~ "Prev"
+    )
+  )
+```
+
+Okay let's import the relative abundance data to check the same taxa that Tom did
+
+```{r import.rel.ab}
+rel_ab = read.csv('data/rh_abx_data_rel_abundance.csv',
+                  colClasses = c(public_client_id = "character"))
+
+# Merge df
+entero_rel_ab <- merge(result_df, rel_ab, by.x = "sample", by.y = "public_client_id")
+```
+
+```{r toms.plot.params}
+# will re-order so this matches Tom's plots
+entero_rel_ab$enterotype <- factor(entero_rel_ab$enterotype,
+                                   levels = c("Bac1", "Rum", "Bac2", "Prev"))
+
+color_scheme=c(
+  "Prev"="yellowgreen",
+  "Rum"="orange",
+  "Bac1"="#088888",
+  "Bac2"="#A280AE"
+)
+```
+
+```{r prevotella}
+prev = ggplot(entero_rel_ab,
+           aes(enterotype, Bacteria_Bacteroidetes_Bacteroidia_Bacteroidales_Prevotellaceae_Prevotella_9,
+               fill=factor(enterotype))) +
+  theme_bw() +
+  scale_fill_manual(values = color_scheme) + 
+  stat_boxplot(geom = "errorbar", width = .5) + 
+  geom_boxplot(outlier.size = .4) +
+  theme(text=element_text(size=14)) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  labs(y = "Prevotella_9") +
+  theme(legend.position = "none")
+
+# ggsave("prevotella.pdf", width = 4, height = 4)
+```
+
+
+```{r plot.faec}
+faecali = ggplot(entero_rel_ab,
+           aes(enterotype, Bacteria_Firmicutes_Clostridia_Clostridiales_Ruminococcaceae_Faecalibacterium,
+               fill=factor(enterotype))) + theme_bw() +
+  scale_fill_manual(values = color_scheme) + 
+  stat_boxplot(geom = "errorbar", width = .5) + 
+  geom_boxplot(outlier.size = .4) +
+  theme(text=element_text(size=14)) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  labs(y = "Faecalibacterium") +
+  theme(legend.position = "none")
+```
+
+
+```{r plot.bac}
+bacteroides = ggplot(entero_rel_ab,
+              aes(enterotype, Bacteria_Bacteroidetes_Bacteroidia_Bacteroidales_Bacteroidaceae_Bacteroides,
+               fill=factor(enterotype)), legend()) +
+  theme_bw() +
+  scale_fill_manual(values = color_scheme) + 
+  stat_boxplot(geom = "errorbar", width = .5) + 
+  geom_boxplot(outlier.size = .4) +
+  theme(text=element_text(size=14)) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) + 
+  labs(y = "Bacteroides") + 
+  theme(legend.position = "none")
+```
+
+```{r plot.rum}
+rum = ggplot(entero_rel_ab,
+             aes(enterotype, Bacteria_Firmicutes_Clostridia_Clostridiales_Ruminococcaceae_Ruminococcus_2,
+                 fill=factor(enterotype)))+
+  theme_bw() +
+  scale_fill_manual(values = color_scheme) + 
+  stat_boxplot(geom = "errorbar", width = .5) + 
+  geom_boxplot(outlier.size = .4) +
+  theme(text=element_text(size=14)) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) + 
+  labs(y = "Ruminococcus_2")
+```
+
+```{r stitch.together}
+library(patchwork)
+(bacteroides + prev) / (faecali + rum)
+```
+
+```{r save.enterotypes}
+# Let's work in another notebook
+write.csv(result_df, "data/abx_recency_enterotypes.csv",
+          row.names = FALSE,
+          quote = TRUE)
+```

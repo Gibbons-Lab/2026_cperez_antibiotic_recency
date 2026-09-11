@@ -18,8 +18,8 @@ the other with all the comparisons from published literature. The 3 month group
 data will still be shown so it's easier to compare directionality. 
 
 ```{r read.data}
-metab_betas = read.csv("data/metabolite_abx_regressions_betas.csv")
-q_values = read.csv("data/metabolite_abx_regressions_qs.csv")
+metab_betas = read.csv("../data/metabolite_abx_regressions_betas.csv")
+q_values = read.csv("../data/metabolite_abx_regressions_qs.csv")
 
 rownames(metab_betas) = metab_betas$plot_name
 metab_betas$plot_name <- NULL
@@ -66,7 +66,7 @@ sub_pathway <- metabs_sorted$SUB_PATHWAY
 unique_categories <- unique(sub_pathway)
 
 # Assign colors from Paired palette (up to 12 colors)
-palette <- colorRampPalette(brewer.pal(12, "Paired"))(13)
+palette <- colorRampPalette(brewer.pal(9, "Set1"))(15)
 category_colors <- setNames(palette[1:length(unique_categories)], unique_categories)
 
 gene_microbe_colors <- c(
@@ -83,7 +83,7 @@ row_anno <- rowAnnotation(
     Determinant_Association = gene_microbe_colors),
   simple_anno_size = unit(3, "mm"),
   show_annotation_name = FALSE,
-  gp = gpar(col = "#696969", lwd = 0.15)
+  gp = gpar(col = "#808080", lwd = 0.15)
 )
 ```
 
@@ -102,9 +102,8 @@ qval_mat <- q_matrix[rownames(abx_matrix), ]
 
 
 ```{r fig.height=8, fig.width=10}
-abx_col_fun <- colorRamp2(c(-0.5, 0, 0.5), c("blue", "white", "red")) #"#FFF0F5"
+abx_col_fun <- colorRamp2(c(-0.5, 0, 0.5), c("blue", "white", "red")) 
 col_split = c("Arivale", "Arivale", "HCHS/SOL", "HCHS/SOL", "MetaCardis", "MetaCardis")
-
 
 abx_ht <- Heatmap(abx_matrix,
                   name = "Beta coefficient",
@@ -121,7 +120,7 @@ abx_ht <- Heatmap(abx_matrix,
                   row_names_side = "left", 
                   row_names_gp = gpar(fontsize = 10),
                   height = unit(nrow(abx_matrix) * 5, "mm"),
-                  rect_gp = gpar(col ="#696969", lwd = 1), 
+                  rect_gp = gpar(col ="#808080", lwd = 1), 
                   cell_fun = function(j, i, x, y, width, height, fill) {
                      pval <- qval_mat[i, j]
                      star <- stars(pval)
@@ -133,64 +132,197 @@ abx_ht
 Save subplot A below!
 
 ```{r}
-pdf("figures/metabs_abx_arivale_sol_metacardis.pdf", width = 10, height = 8)  # open a PDF device
+pdf("../figures/metabs_abx_arivale_sol_metacardis.pdf", width = 10, height = 8)  # open a PDF device
 plot(abx_ht)                                
 dev.off()                                 
 ```
 
 ## Now make subplot for literature comparison
-Here we also will introduce which metabolites are used for mediation analysis. 
-That said, we will constrain the rows to only include metabolites which are 
-associated with glucose control in other cohorts. 
 
-```{r subset cols lit}
-lit_estimates = read.csv("data/metabolite_meta_analysis_30Apr2026.csv")
+```{r read.rename.cols.lit}
+lit_estimates = read.csv("../data/metabolite_meta_analysis_18Aug2026.csv")
 
 rownames(lit_estimates) = lit_estimates$plot_name
 lit_estimates$plot_name <- NULL
 
-metabs_sorted_lit <- lit_estimates[order(
-  lit_estimates[, "abx_three"], decreasing = TRUE), ]
-
 rename_vec <-  c(
     abx_three = "0 - 3 mo.",
-    chol_meds = "Cholesterol med. use",
     blood_sugar_meds = "Blood sugar med. use",
-    MMC  = "MMC",
-    UMMC = "UMMC", 
-    IFG_OR  = "IFG",
-    IGT_OR   = "IGT",
+    metacardis_t2dm  = "M T2D",
     CGI_T2D_OR = "CGI/T2D",
     EPIC_T2DM = "T2D (HR)",
-    EPIC_two_dx_OR = "Multimorbidity (OR)",
-    li_t2dm = "Incident T2D"
+    li_t2dm = "Incident T2D",
+    Qatari_T2D = "Qatari T2D"
   )
 
 colnames(lit_estimates) <- recode(colnames(lit_estimates), !!!rename_vec)
 ```
 
-```{r subset rows}
-metabs_keep = c(
-  # Sorted by agreement
-  # Agree: Positive
-  "isoursodeoxycholate", # There was another one here
-  
-  # Agree: Negative
-  "hippurate","cinnamoylglycine", "3-phenylpropionate", "indolepropionate",
-  "X - 12216",
-  
-  # Disagree: Positive
-  # "4-hydroxyhippurate",
-  
-  # Disagree: Negative
-  "4-methyl-2-oxopentanoate",  "2-hydroxy-3-methylvalerate", "alpha-hydroxyisovalerate",
-   "citrate", "N-lactoyl leucine", "alpha-hydroxyisocaproate", "3-hydroxydecanoate"
-  
-   #, "3-(4-hydroxyphenyl)lactate", "3-hydroxy-2-ethylpropionate", 
-   #"X - 21353", "hydantoin-5-propionate", "acetylcarnitine (C2)"
+```{r subset.data}
+# So we can get the proper signage
+beta_cols <- c(
+  "0 - 3 mo.",
+  "Blood sugar med. use",
+  "M T2D",
+  "Qatari T2D"
 )
 
-lit_df_subset <- lit_estimates[metabs_keep, ]
+ratio_cols <- c(
+  "CGI/T2D",
+  "Incident T2D",
+  "T2D (HR)"
+  )
+
+# Establish column order
+bs_cols <- c("0 - 3 mo.",
+              "Blood sugar med. use",
+              "M T2D",
+              "CGI/T2D",
+              "Qatari T2D",
+              "Incident T2D", 
+              "T2D (HR)"
+              )
+
+metabolite_order <- c(
+  "hippurate",
+  "cinnamoylglycine",
+  "3-phenylpropionate (hydrocinnamate)",
+  "indolepropionate",
+  "isoursodeoxycholate",
+  "2-hydroxy-3-methylvalerate",
+  "alpha-hydroxyisovalerate",
+  "4-methyl-2-oxopentanoate",
+  "alpha-ketobutyrate",
+  "2-hydroxybutyrate/2-hydroxyisobutyrate",
+  "3-hydroxyoctanoate",
+  "3-hydroxydecanoate",
+  "3-hydroxylaurate",
+  "3-hydroxymyristate",
+  "X - 21353"
+)
+  
+# Now subset the metabolites
+lit_df_subset <- lit_estimates[metabolite_order, ]
+
+# Save the subpathway
+sub_pathway_plot_b <- lit_df_subset$SUB_PATHWAY
+
+direction_mat <- lit_df_subset[, c(bs_cols)]
+```
+
+
+```{r binarize.color.scheme}
+# Beta: negative = -1, positive = +1
+direction_mat[beta_cols] <- lapply(
+  direction_mat[beta_cols],
+  sign
+)
+
+# OR / HR: below 1 = -1, above 1 = +1
+direction_mat[ratio_cols] <- lapply(
+  direction_mat[ratio_cols],
+  function(x) sign(x - 1)
+)
+
+direction_col <- c(
+  "-1" = "#4575B4",
+   "0" = "white",
+   "1" = "#970023" 
+)
+```
+
+
+```{r abx.v.t2d.direction}
+abx_concordant_metabs <- c(
+  "hippurate",
+  "cinnamoylglycine",
+  "3-phenylpropionate (hydrocinnamate)",
+  "indolepropionate",
+  "isoursodeoxycholate"
+)
+
+# Derive per-row label from the matrix row order (edit the rownames() source
+# to whatever object drives the heatmap rows — e.g. direction_mat_lab).
+abx_concordance <- ifelse(
+  rownames(direction_mat) %in% abx_concordant_metabs,
+  "Concordant",
+  "Discordant"
+)
+
+concordance_colors <- c(
+  "Concordant" = "yellowgreen",  # green = agrees
+  "Discordant" = "black"   # purple = flips
+)
+
+row_anno <- rowAnnotation(
+  SUB_PATHWAY = sub_pathway_plot_b,
+  `Abx recency concordance` = abx_concordance,
+  col = list(
+    SUB_PATHWAY = category_colors,
+    `Abx recency concordance` = concordance_colors),
+  simple_anno_size = unit(3, "mm"),
+  show_annotation_name = FALSE,
+  gp = gpar(col = "#808080", lwd = 0.15)
+)
+```
+
+
+```{r}
+cohort_split = c("1 Arivale", "1 Arivale",
+                 "2 MetaCardis", 
+                 "3 Swedish",
+                 "4 Qatari",
+                 "5 SOL",
+                 "6 EPIC-Norfolk"
+                 )
+
+direction_mat <- as.matrix(direction_mat)
+```
+
+```{r, fig.height=10, fig.width=11}
+ht_cohorts <- Heatmap(direction_mat,
+                   name = "Direction of Association",
+                   #row_names_max_width = grid::unit(8, "cm"),
+                   col = direction_col,
+                   na_col = "#C0C0C0",
+                   left_annotation = row_anno,
+                   column_split = cohort_split,
+                   column_names_rot = 45,
+                   column_names_gp = gpar(fontsize = 10),
+                   column_gap = unit(2, "mm"),
+                   cluster_rows = FALSE,
+                   cluster_columns = FALSE,
+                   show_row_names = TRUE, 
+                   row_names_side = "left", 
+                   row_names_gp = gpar(fontsize = 10),
+                   height = unit(nrow(direction_mat) * 5, "mm"),
+                   rect_gp = gpar(col = "white", lwd = 1))
+ht_cohorts
+```
+
+
+```{r subset rows}
+# metabs_keep = c(
+#   # Sorted by agreement
+#   # Agree: Positive
+#   "isoursodeoxycholate", # There was another one here
+#   
+#   # Agree: Negative
+#   "hippurate","cinnamoylglycine", "3-phenylpropionate", "indolepropionate",
+#   "X - 12216",
+#   
+#   # Disagree: Positive
+#   # "4-hydroxyhippurate",
+#   
+#   # Disagree: Negative
+#   "4-methyl-2-oxopentanoate",  "2-hydroxy-3-methylvalerate", "alpha-hydroxyisovalerate",
+#    "citrate", "N-lactoyl leucine", "alpha-hydroxyisocaproate", "3-hydroxydecanoate"
+#   
+#    #, "3-(4-hydroxyphenyl)lactate", "3-hydroxy-2-ethylpropionate", 
+#    #"X - 21353", "hydantoin-5-propionate", "acetylcarnitine (C2)"
+# )
+# 
+lit_df_subset <- lit_estimates #[metabs_keep, ]
 ```
 
 ### Add annotatons
@@ -222,9 +354,10 @@ hr_col_fun   <- colorRamp2(c(0.75, 1, 1.5), c("#191970", "white", "#FF1493")) #E
 # cliff_col_fun <- colorRamp2(c(-0.75, 0, 0.75), c("pink", "white", "#4B0082")) #"#FFF0F5"
 
 beta_cols <- c("0 - 3 mo.",
-               "Cholesterol med. use",
                "Blood sugar med. use",
-               "MMC", "UMMC"
+               "Metabolic Syndrome",
+               "Severe Obesity",
+               "M T2D"
                )
 
 or_cols   <- c("IFG",
@@ -239,18 +372,10 @@ rownames(beta_matrix) <- rownames(lit_df_subset)
 or_matrix   <- as.matrix(lit_df_subset[, or_cols])
 hr_matrix   <- as.matrix(lit_df_subset[, hr_cols, drop = FALSE])
 
-### Old
-#cliff_matrix   <- as.matrix(lit_df_subset[, cliff_cols])
-#rr_matrix   <- as.matrix(lit_df_subset[, rr_cols, drop = FALSE])
-
 # Define gaps (e.g., split by study)
-beta_split = c("Arivale", "Arivale","Arivale", "MetaCardis", "MetaCardis")
+beta_split = c("Arivale", "Arivale", "MetaCardis", "MetaCardis", "MetaCardis")
 or_split = c("Swedish", "Swedish", "Swedish", "EPIC-Norfolk")
-hr_split = c("HCHS/SOL", "EPIC-Norfolk")
-
-## OLD
-# cliff_split = c("MetaCardis", "MetaCardis")
-# rr_split = c("HCHS/SOL")
+hr_split = c("EPIC-Norfolk", "10 Cohorts")
 ```
 
 Time to put the plots together!
@@ -260,7 +385,7 @@ Time to put the plots together!
 ht_beta <- Heatmap(beta_matrix,
                    name = "Beta coefficient",
                    col = beta_col_fun,
-                   na_col = "#C0C0C0",
+                   na_col = "#F3F3F3",
                    left_annotation = row_anno,
                    column_split = beta_split,
                    column_names_rot = 45,
@@ -277,7 +402,7 @@ ht_beta <- Heatmap(beta_matrix,
 ht_or <- Heatmap(or_matrix,
                  name = "Odds Ratio",
                  col = or_col_fun,
-                 na_col = "#C0C0C0",
+                 na_col = "#F3F3F3",
                  column_split = or_split,
                  column_names_rot = 45,
                  column_names_gp = gpar(fontsize = 10),
@@ -291,7 +416,7 @@ ht_or <- Heatmap(or_matrix,
 ht_hr <- Heatmap(hr_matrix,
                  name = "Hazard Ratio",
                  col = hr_col_fun,
-                 na_col = "#C0C0C0",
+                 na_col = "#F3F3F3",
                  column_split = hr_split,
                  column_names_rot = 45,
                  column_names_gp = gpar(fontsize = 10),
@@ -303,17 +428,16 @@ ht_hr <- Heatmap(hr_matrix,
                  rect_gp = gpar(col = "#696969", lwd = 1))
 
 # Combine
-# all_plot <- ht_beta + hr_cliff + ht_hr + ht_or  + ht_rr
 all_plot <- ht_beta + ht_or + ht_hr
 ```
 
-```{r fig.height=7, fig.width=11}
+```{r fig.height=15, fig.width=15}
 all_plot
 ```
 
 
 ```{r}
-pdf("figures/metabs_lit_comparison_heatmap_metacardis_regs_li2026.pdf",
+pdf("../figures/metabs_lit_comparison_heatmap_metacardis_regs_li2026.pdf",
     width = 11, height = 7)  # open a PDF device
 plot(all_plot)                                
 dev.off()                                 

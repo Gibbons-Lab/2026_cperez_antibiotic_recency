@@ -24,13 +24,13 @@ packageVersion("vegan")
 
 ```{r read.in.data}
 # Specifying colClass so leading 0 is not dropped
-counts = read.csv("data/rh_abx_genus_level_counts.csv",
+counts = read.csv("../data/rh_abx_genus_level_counts.csv",
                   colClasses = c(public_client_id = "character"))
 
 counts$days_in_program <- NULL
 
 # Specifying colClass so leading 0 is not dropped
-metadata = read.csv("data/abx_covariates_with_statins_a1c_all_covars.csv",
+metadata = read.csv("../data/abx_covariates_with_statins_a1c_all_covars.csv",
                     colClasses = c(public_client_id = "character"))
  
 filtered_metadata = filter(metadata, public_client_id %in% counts$public_client_id)
@@ -138,7 +138,7 @@ rarefied_counts <- rrarefy(counts_matrix, raremax)
 
 ```{r save.rarefied.csv}
 # This will be used for logistic regression and the microbe-metab regressions
-write.csv(rarefied_counts, "data/rh_abx_cohort_rarefied_counts.csv", row.names = TRUE)
+write.csv(rarefied_counts, "../data/rh_abx_cohort_rarefied_counts.csv", row.names = TRUE)
 ```
 
 ### Shannon
@@ -169,14 +169,13 @@ alpha_meta
 ```
 
 ```{r save.csv}
-write.csv(alpha_meta, "data/rh_abx_covar_alpha_divs_rarefied.csv", row.names = FALSE)
+write.csv(alpha_meta, "../data/rh_abx_covar_alpha_divs_rarefied.csv", row.names = FALSE)
 ```
-
 
 ## Now let's do the same thing with the follow up stool count tables
 
 ```{r read.in.get.matrix}
-counts_followup = read.csv("",
+counts_followup = read.csv("../data/repeat_client_follow_up_genera_counts.csv",
                   colClasses = c(public_client_id = "character"))
 
 # Add clients as row names, drop that col
@@ -195,6 +194,7 @@ Srare_fu <- rarefy(counts_matrix_followup, raremax_fu) # Num obs spec when raref
 plot(S_fu, Srare_fu, xlab = "Observed No. of Species", ylab = "Rarefied No. of Species")
 abline(0, 1)
 ```
+
 ```{r}
 rarecurve(counts_matrix_followup, step = 200, sample = raremax_fu, col = "blue", cex = 0.6)
 ```
@@ -229,6 +229,6 @@ alpha_meta_followup
 ```
 
 ```{r save.csv.followup}
-#write.csv(alpha_meta_followup, "data/abx_followups_alphadivs_rarefied.csv", row.names = FALSE)
+write.csv(alpha_meta_followup, "../data/abx_followups_alphadivs_rarefied.csv", row.names = FALSE)
 ```
 
