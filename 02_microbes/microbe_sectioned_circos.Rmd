@@ -37,16 +37,17 @@ shared    <- intersect(or_names, clr_names)     # 40
 or_only   <- setdiff(or_names,  clr_names)      # 83
 clr_only  <- setdiff(clr_names, or_names)       # 39
 
-# Single-analysis sectors: order by that analysis' 3-month group (abx_three), DESC.
+# Single-analysis sectors: order by abx_three
 or_only_sorted  <- or_only[ order(microbe_ORs[or_only,   "abx_three"], decreasing = TRUE) ]
 clr_only_sorted <- clr_only[order(microbe_betas[clr_only, "abx_three"], decreasing = TRUE) ]
-# Shared sector: keep OR df abx_three-descending order (skill convention).
+
+# Shared: keep OR df abx_three-descending order
 shared_sorted   <- shared[  order(microbe_ORs[shared,    "abx_three"], decreasing = TRUE) ]
 
-# Combined row order for every matrix (sector blocks, in draw order):
+# Combined row order for every matrix
 taxa_order <- c(or_only_sorted, shared_sorted, clr_only_sorted)
 
-# Sector factor -> controls sector placement order around the circle.
+# controls sector placement order around the circle.
 split_fac <- factor(
   c(rep("Logit only", length(or_only_sorted)),
     rep("Shared",     length(shared_sorted)),
@@ -58,11 +59,11 @@ stopifnot(length(taxa_order) == length(split_fac))
 
 ```{r rename.cols}
 rename_vec <- c(abx_twelve = "3 - 12 mo.", abx_three = "0 - 3 mo.")
-colnames(microbe_ORs)   <- recode(colnames(microbe_ORs),   !!!rename_vec)
-colnames(microbe_betas) <- recode(colnames(microbe_betas), !!!rename_vec)
+colnames(microbe_ORs)   <- dplyr::recode(colnames(microbe_ORs),   !!!rename_vec)
+colnames(microbe_betas) <- dplyr::recode(colnames(microbe_betas), !!!rename_vec)
 # CRITICAL: rename q-value cols too so stars are selected by matching names.
-colnames(q_values_OR)   <- recode(colnames(q_values_OR),   !!!rename_vec)
-colnames(q_values_beta) <- recode(colnames(q_values_beta), !!!rename_vec)
+colnames(q_values_OR)   <- dplyr::recode(colnames(q_values_OR),   !!!rename_vec)
+colnames(q_values_beta) <- dplyr::recode(colnames(q_values_beta), !!!rename_vec)
 ```
 
 ```{r stars}
@@ -78,7 +79,6 @@ stars <- function(p) {
 ```
 
 ```{r matrices}
-# 12-mo OUTER, 3-mo INNER  -> 12-mo column first.
 val_cols <- c("3 - 12 mo.", "0 - 3 mo.")
 q_cols   <- c("0 - 3 mo.", "3 - 12 mo.")
 
@@ -98,7 +98,7 @@ beta_matrix <- align_mat(microbe_betas, taxa_order, val_cols)
 qval_mat_OR   <- align_mat(q_values_OR,   taxa_order, q_cols)
 qval_mat_beta <- align_mat(q_values_beta, taxa_order, q_cols)
 
-# Sanity: all matrices share identical row order.
+# All matrices should share identical row order.
 stopifnot(identical(rownames(OR_matrix),   taxa_order))
 stopifnot(identical(rownames(beta_matrix), taxa_order))
 stopifnot(identical(rownames(qval_mat_OR),   taxa_order))
@@ -106,7 +106,6 @@ stopifnot(identical(rownames(qval_mat_beta), taxa_order))
 ```
 
 ```{r annotations}
-# Prevalence + phylum: prefer OR df; fall back to CLR df for CLR-only taxa.
 anno_src <- function(taxon, field) {
   if (taxon %in% rownames(microbe_ORs))   return(microbe_ORs[taxon,   field])
   if (taxon %in% rownames(microbe_betas)) return(microbe_betas[taxon, field])
@@ -149,7 +148,7 @@ circos.par(start.degree = 90,
            gap.after = c("Logit only" = 3, "Shared" = 3, "CLR only" = 15),
            cell.padding = c(0, 0, 0, 0))
 
-# --- Ring 1 (OUTER): OR heatmap ---
+# OR heatmap
 circos.heatmap(OR_matrix, split = split_fac, col = or_col_fun, na.col = "white",
                cluster = FALSE,
                rownames.side = "outside", rownames.cex = 0.5,
@@ -165,7 +164,7 @@ circos.track(track.index = or_track, bg.border = NA, panel.fun = function(x, y) 
   }
 })
 
-# --- Ring 2: CLR / beta heatmap ---
+# CLR heatmap
 circos.heatmap(beta_matrix, col = beta_col_fun, na.col = "white",
                cluster = FALSE,
                track.height = 0.10, bg.border = "black", bg.lwd = 0.4)
@@ -180,13 +179,13 @@ circos.track(track.index = beta_track, bg.border = NA, panel.fun = function(x, y
   }
 })
 
-# --- Ring 3: prevalence annotation ---
+# revalence annotation
 prev_mat <- matrix(anno_prevalence, ncol = 1,
                    dimnames = list(taxa_order, "Prevalence"))
 circos.heatmap(prev_mat, col = cont_colors, cluster = FALSE,
                track.height = 0.03, bg.border = "black", bg.lwd = 0.1)
 
-# --- Ring 4 (INNER): phylum annotation ---
+# phylum annotation
 phy_mat <- matrix(anno_phyla, ncol = 1,
                   dimnames = list(taxa_order, "Phylum"))
 circos.heatmap(phy_mat, col = phyla_colors, cluster = FALSE,

@@ -55,7 +55,6 @@ results = Parallel(n_jobs=4, backend="loky", verbose=5)(
 
 all_metab_abx_interactions = pd.concat([r for r in results if not r.empty], ignore_index=True)
 
-# ---- Second-level / global FDR across ALL chemistry x metabolite tests (your #4) ----
 # q_value        = within-chemistry BH  (each lab is its own hypothesis family)
 # q_value_global = BH across every interaction test in the entire run
 all_metab_abx_interactions["q_value_global"] = multipletests(

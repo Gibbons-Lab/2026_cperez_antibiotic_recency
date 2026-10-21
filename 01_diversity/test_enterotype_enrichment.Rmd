@@ -1,0 +1,208 @@
+---
+title: "enterotype enrichment"
+output: html_notebook
+---
+
+# Load libraries
+
+```{r}
+library(ggplot2)
+library(broom)
+library(dplyr)
+library(purrr)
+```
+
+
+# Read in data
+
+```{r set.up.data}
+#abx_recency_enterotypes.csv
+
+enterotypes = read.csv('../data/abx_recency_enterotypes.csv',
+                  colClasses = c(sample = "character"))
+
+abx_covar = read.csv('../data/abx_covariates_with_statins_a1c_all_covars.csv',
+                  colClasses = c(public_client_id = "character"))
+
+names(enterotypes)[1] <- "public_client_id"
+
+# Merge metadata w/ labs onto enterotypes
+abx_entero_merged <- merge(enterotypes, abx_covar,
+                         by = "public_client_id")
+
+# Factor abx recency
+abx_entero_merged$abx_recency <- factor(abx_entero_merged$abx_recency,
+                                        levels=c("none", "twelve", "three"))
+```
+
+Let's set up creation of our plots
+
+```{r create.med.context}
+# This will paste the text along with the variable condition
+# None will be -
+# Users will be +
+abx_entero_merged$med_context <- paste0(
+  "abx ", ifelse(abx_entero_merged$abx_recency == "none", "-", "+"), " / ",
+  "statin ", ifelse(abx_entero_merged$statin_binary == "Yes", "+", "-")
+)
+
+# Create a new df to look at instances for each med context
+plot_data <- dplyr::count(
+  abx_entero_merged,      # In this df
+  med_context,                # Within each group
+  enterotype,                 # Count the enterotypes
+  name = "enterotype_count")
+
+# Next we should count the med contexts to calculate proportions
+med_context_count <- dplyr::count(
+  abx_entero_merged,            # In df
+  med_context,                      # count med_context
+  name = "med_context_count")
+
+# Now left join on plot data to propagate the med_context sums
+plot_data <- dplyr::left_join(
+  plot_data,                      
+  med_context_count,
+  by = "med_context"
+)
+
+# Now let's calculate the percentage of each enterotype within context
+plot_data <- group_by(plot_data, med_context)
+plot_data <- mutate(
+  plot_data,                          # In this df
+  total_N = enterotype_count,         # New col for total N
+  percentage = (enterotype_count      # Calculate percentable
+                / med_context_count),
+  x_label_with_N = paste0(            # Make x-axis label
+    med_context, "\n(N = ",
+    enterotype_count, ")")
+)
+
+plot_data <- ungroup(plot_data)
+```
+
+```{r color.scheme}
+color_scheme=c(
+  "Prev"="yellowgreen",
+  "Rum"="#d2b48cff",
+  "Bac1"="#e6e6faff",
+  "Bac2"="#a288aaff"
+)
+```
+
+
+```{r fig.width=4, fig.height=5}
+p <- ggplot(abx_entero_merged, aes(x = abx_recency, fill = enterotype)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = color_scheme) + 
+  geom_text(stat = "count",
+            aes(label = scales::percent(
+              after_stat(count / tapply(count, x, sum)[x]),
+              accuracy = 1
+              )),
+    position = position_fill(vjust = 0.5)
+  ) +
+
+  # Simplest way to add (N=) to X-axis: calculate counts dynamically right here
+  scale_x_discrete(
+    labels = function(x) paste0(x, "\n(N = ", table(abx_entero_merged$abx_recency)[x], ")")
+  ) +
+  theme(text=element_text(size=14)) +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black")) +
+  labs(y = "Enterotype Distribution (%)", x = "Medication Use")
+```
+
+```{r save.pdf}
+#ggsave("abx_recency_entero.pdf", plot = p, width = 4, height = 5)
+```
+
+
+Look at Bac2 enchrichment in the cohort:
+
+```{r bac2.logit}
+abx_entero_merged$bac2 <- ifelse(abx_entero_merged$enterotype == "Bac2",
+                                     1,  # Bac2
+                                     0)  # All other enterotypes
+
+abx_entero_merged$bac2 <- factor(abx_entero_merged$bac2)
+
+bac2_logit_abx_recency <- glm(bac2 ~ age + sex + centered_BMI + vendor_dashboard + 
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR +
+                     meds_cholesterol + meds_blood_sugar + abx_recency,
+                    family = binomial(), data = abx_entero_merged)
+
+summary(bac2_logit_abx_recency)
+```
+
+Also test a depletion in the Rum enterotype.
+
+```{r rum.logit}
+abx_entero_merged$rum <- ifelse(abx_entero_merged$enterotype == "Rum",
+                                     1,  # Rum
+                                     0)  # All other enterotypes
+
+abx_entero_merged$rum <- factor(abx_entero_merged$rum)
+
+rum_logit_abx_recency <- glm(rum ~ age + sex + centered_BMI + vendor_dashboard + 
+                    PC1 + PC2 + PC3 + PC4 + PC5 + centered_eGFR +
+                     meds_cholesterol + meds_blood_sugar + abx_recency,
+                    family = binomial(), data = abx_entero_merged)
+
+summary(rum_logit_abx_recency)
+```
+
+
+```{r create.table.fder}
+results <- bind_rows(
+  tidy(bac2_logit_abx_recency) %>% mutate(Outcome = "bac2"),
+  tidy(rum_logit_abx_recency) %>% mutate(Outcome = "rum")
+) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  )
+
+# Apply FDR separately for each contrast
+results <- results %>%
+  group_by(term) %>%
+  mutate(FDR_p = p.adjust(p.value, method = "BH")) %>%
+  ungroup()
+
+# Format the results table
+results_table <- results %>%
+  transmute(
+    Contrast = term,
+    Outcome,
+    Coef = estimate,
+    SE = std.error,
+    Z = statistic,
+    OR,
+    `95% CI` = sprintf("%.2f–%.2f", CI_lower, CI_upper),
+    `Raw p` = p.value,
+    `FDR-adjusted p` = FDR_p
+  )
+
+table_abx_recencythree <- results_table %>%
+  filter(Contrast == "abx_recencythree")
+
+table_abx_recencytwelve <- results_table %>%
+  filter(Contrast == "abx_recencytwelve")
+```
+
+```{r print.three}
+table_abx_recencythree
+```
+
+
+```{r print.twelve}
+table_abx_recencytwelve
+```
+
+
+

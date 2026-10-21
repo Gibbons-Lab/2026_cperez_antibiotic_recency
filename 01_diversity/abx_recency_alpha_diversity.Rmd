@@ -1,5 +1,5 @@
 ---
-title: "alpha_diversity_calcs_abx"
+title: "abx_recency_alpha_diversity"
 author: "Crystal Perez"
 date: "2026-07-06"
 output: html_document
@@ -19,7 +19,8 @@ library(tidyr)
 ```
 
 ```{r}
-packageVersion("vegan")
+#packageVersion("vegan")
+#citation("vegan")
 ```
 
 ```{r read.in.data}
@@ -175,8 +176,14 @@ write.csv(alpha_meta, "../data/rh_abx_covar_alpha_divs_rarefied.csv", row.names 
 ## Now let's do the same thing with the follow up stool count tables
 
 ```{r read.in.get.matrix}
-counts_followup = read.csv("../data/repeat_client_follow_up_genera_counts.csv",
+counts_followup_all = read.csv("../data/repeat_client_follow_up_genera_counts.csv",
                   colClasses = c(public_client_id = "character"))
+
+check_membership = read.csv("../data/stool_repeat_clients_long.csv",
+                  colClasses = c(public_client_id = "character"))
+
+counts_followup <- counts_followup_all[
+  counts_followup_all$public_client_id %in% check_membership$public_client_id, ]
 
 # Add clients as row names, drop that col
 rownames(counts_followup) <- counts_followup$public_client_id

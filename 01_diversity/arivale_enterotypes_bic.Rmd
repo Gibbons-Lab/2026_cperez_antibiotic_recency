@@ -1,5 +1,5 @@
 ---
-title: "arivale_statins_enterotypes"
+title: "arivale_enterotypes_bic"
 author: "Crystal Perez"
 date: "2026-06-12"
 output: html_document

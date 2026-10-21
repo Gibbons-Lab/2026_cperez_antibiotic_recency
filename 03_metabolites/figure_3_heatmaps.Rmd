@@ -1,5 +1,5 @@
 ---
-title: "metabolite_meta_analysis"
+title: "figure_3_heatmaps"
 author: "Crystal Perez"
 date: "2025-06-18"
 output: html_document
@@ -15,7 +15,7 @@ library(RColorBrewer)
 ## Read in metabolite data
 We'll be making two subplots here: one version with abx only information, and 
 the other with all the comparisons from published literature. The 3 month group 
-data will still be shown so it's easier to compare directionality. 
+data will still be shown so it's easier to compare direction. 
 
 ```{r read.data}
 metab_betas = read.csv("../data/metabolite_abx_regressions_betas.csv")
@@ -292,14 +292,14 @@ ord <- order(
   -my_matrix[, "abx_three"]          # final tie-breaker: actual value
 )
 
-# --- 2. Apply that SAME permutation to everything the plot indexes ----------
+# apply ord to all matrices
 # Value matrices (drop = FALSE keeps single-column matrices as matrices)
 my_matrix   <- my_matrix[ord, , drop = FALSE]
 beta_matrix <- beta_matrix[ord, , drop = FALSE]
 or_matrix   <- or_matrix[ord, , drop = FALSE]
 hr_matrix   <- hr_matrix[ord, , drop = FALSE]
 
-# q-value matrices  <-- these are what the stars read; they MUST match
+# q-value matrices
 my_qs   <- my_qs[ord, , drop = FALSE]
 beta_qs <- beta_qs[ord, , drop = FALSE]
 or_qs   <- or_qs[ord, , drop = FALSE]
@@ -309,7 +309,7 @@ hr_qs   <- hr_qs[ord, , drop = FALSE]
 sub_pathway_plot_b <- sub_pathway_plot_b[ord]
 abx_concordance    <- abx_concordance[ord]
 
-# --- 4. Build the row annotation (uses A's category_colors) -----------------
+# row annotation, colors/categories from subplot A
 row_anno <- rowAnnotation(
   SUB_PATHWAY = sub_pathway_plot_b,
   `Abx recency concordance` = abx_concordance,

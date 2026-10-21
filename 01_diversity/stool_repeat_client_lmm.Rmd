@@ -24,6 +24,7 @@ library(cowplot)
 packageVersion("lme4")
 ```
 
+
 # Test differences in alpha diversity trajectories over time by abx use group
 ## Read and format data
 
@@ -155,7 +156,7 @@ results_lmm_alphas <- data.frame(
 results_lmm_alphas
 ```
 
-Awesome, looks like all of these meet q<0.1, suggesting that having the interaction
+Awesome, looks like richness q < 0.1, suggesting that having the interaction
 between the time*group variable (i.e., different slopes for the antibiotic users)
 was helpful in modeling the data. This may suggest that the recovery trajectory 
 was different between the antibiotic use groups. Let's go ahead and look at the data
@@ -172,11 +173,8 @@ models_interaction$observed_features
 ```
 Looks like the average person in the reference/none group showed a slight
 decrease in the number of observed features over time. In particular, it's a decrease
-of -0.29 features over a period of 100 days. However, the individuals in the 
+of -0.079 features over a period of 100 days. However, the individuals in the 
 antibiotic groups have a different slope.
-
-- **Three month group:**  -0.2916 + 1.1888  = 0.8972
-- **Twelve month group:** -0.2916 + 0.4788  = 0.1872
 
 In all cases, the magnitude of the change is quite small, but it is interesting
 that the change is greatest/most positive for the 3 month group.
@@ -263,7 +261,7 @@ ggplot() +
   theme_minimal()
 ```
 ```{r}
-plot(emm, comparisons = TRUE)
+#plot(emm, comparisons = TRUE)
 ```
 
 

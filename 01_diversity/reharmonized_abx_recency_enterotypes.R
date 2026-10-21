@@ -27,20 +27,3 @@ counts_matrix <- as.matrix(counts)
 fit <- lapply(1:8, dmn, count=counts_matrix, verbose=TRUE,seed=1234)
 
 saveRDS(fit, "harmonized_abx_users_dmm_fit.rds")
-
-# ## Now look at best fit
-# best <- which.min(bic)  # or pick manually, e.g. best <- 4
-# best_fit <- fit[[best]]
-# 
-# # Sample-level cluster assignments
-# clusters <- apply(mixture(best_fit), 1, which.max)
-# result_df <- data.frame(sample = rownames(counts), cluster = clusters)
-# 
-# saveRDS(result_df, "dmm_clusters_abx_recency.rds", row.names = FALSE)
-# 
-# # Mixture probabilities per sample
-# saveRDS(mixture(best_fit), "dmm_mixture_probs_abx_recency.rds")
-# 
-# # Feature (taxon) weights per cluster
-# feature_weights <- fitted(best_fit)
-# saveRDS(feature_weights, "dmm_feature_weights_abx_recency.rds")

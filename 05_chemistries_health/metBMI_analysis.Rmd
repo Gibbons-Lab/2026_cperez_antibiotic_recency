@@ -465,6 +465,8 @@ omni_all$q_omni <- p.adjust(omni_all$p_omni, method = "fdr")
 Let's print the chems with an interaction meeting our threshold:
 ```{r show.significant.chems}
 omni_all %>% filter(omni_all$q_omni <0.1)
+write.csv(omni_all,
+          "../data/metBMI_error_abx_interaction_term_omnibus.csv", row.names = FALSE)
 ```
 
 ## Awesome, after running models, let's extract covariates
@@ -544,6 +546,12 @@ lab_reg_results_all$fdr_p_value <- round(
   FUN = function(p) p.adjust(p, method = "fdr")), 4)
 ```
 
+```{r}
+# Check that the FDR is applied within family (each contrast sep)
+table(lab_reg_results_all$term)
+```
+
+
 Now let's print the rows for those significant in the F-test:
 ```{r sig.chems.interaction.betas}
 get_coefs_list <- omni_all %>% 
@@ -551,6 +559,8 @@ get_coefs_list <- omni_all %>%
   pull(outcome) %>% as.list()
 
 lab_reg_results_all %>% filter(outcome %in% get_coefs_list)
+write.csv(lab_reg_results_all,
+          "../data/metBMI_error_abx_interaction_term_coef_wald.csv", row.names = FALSE)
 ```
 
 ## Look at results in greater detail
@@ -668,7 +678,6 @@ dev.off()
 baso_plot <- plot_chem(metBMI_labs, "BASOPHILSABSOLUTE", y_lab = "check baso unit")
 baso_plot$plot
 ```
-
 
 # Vitamin D sensitivity analyses
 
